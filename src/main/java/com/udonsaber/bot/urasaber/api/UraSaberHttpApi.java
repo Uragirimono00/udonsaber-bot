@@ -166,7 +166,10 @@ public class UraSaberHttpApi {
         volatile int scoreBucket = -1;  // -1 = 미설정
         volatile int accBucket = -1;
         volatile int diff = -1;
-        volatile String currentMap = null;   // 마지막으로 import / select-map 한 BSR
+        volatile String currentMap = null;   // 마지막으로 import / select-map 한 BSR (live, /import 가 덮어씀)
+        // 점수 제출 step 0 (/select-map, /set-imported-map) 에서 lock 되는 BSR. commit 이 이걸 우선 읽음.
+        // /import 는 절대 안 건드림 → 제출 진행 중(~1s, 8-step) 새 곡 import 해도 엉뚱한 곡으로 commit 안 됨.
+        volatile String submissionMap = null;
         // Phase 2 (additional stats, optional)
         volatile int maxComboBucket = -1;  // maxCombo (1 단위)
         volatile int charIdx = -1;         // 0..6 enum
@@ -1052,6 +1055,7 @@ public class UraSaberHttpApi {
             }
             SubmitState s = getOrCreateSubmitState(ip);
             s.currentMap = bsr;
+            s.submissionMap = bsr;  // 제출 step 0 — 이 곡으로 lock (commit 까지 /import 가 못 바꿈)
             log.info("[select-map] ip={} bsr={}", ip, bsr);
             respond(ex, 200, "application/json; charset=utf-8", "{\"ok\":true}");
         } catch (Exception e) {
@@ -1082,6 +1086,7 @@ public class UraSaberHttpApi {
             }
             SubmitState s = getOrCreateSubmitState(ip);
             s.currentMap = li.bsr;
+            s.submissionMap = li.bsr;  // 제출 step 0 — 이 곡으로 lock (commit 까지 /import 가 못 바꿈)
             log.info("[set-imported-map] ip={} bsr={}", ip, li.bsr);
             respond(ex, 200, "application/json; charset=utf-8", "{\"ok\":true,\"bsr\":" + jsonString(li.bsr) + "}");
         } catch (Exception e) {
@@ -1177,6 +1182,8 @@ public class UraSaberHttpApi {
             // map id — query 우선, 없으면 SubmitState.currentMap, 없으면 searchSlots[0] (가장 최근에 시드된 결과의 첫 항목, 사용자가 가장 최근 클릭한 항목과 일치 가능성)
             Map<String, String> qs = parseQuery(ex.getRequestURI().getRawQuery());
             String mapId = nullIfBlank(qs.get("map"));
+            // submissionMap(step 0 에서 lock, /import 가 안 건드림) 우선 → 제출 중 새 곡 import 해도 엉뚱한 곡 commit 방지.
+            if (mapId == null) mapId = s.submissionMap;
             if (mapId == null) mapId = s.currentMap;
             if (mapId == null) {
                 SearchSlotCache cache = searchSlots.get(ip);

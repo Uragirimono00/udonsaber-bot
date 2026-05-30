@@ -33,7 +33,7 @@ jobs:
         run: ./gradlew installDist --no-daemon
 
       - name: Package install dir
-        run: tar -C build/install -czf urasaber-bot-dist.tar.gz urasaber-bot
+        run: tar -C build/install -czf udonsaber-bot-dist.tar.gz udonsaber-bot
 
       - name: Install cloudflared
         run: |
@@ -60,25 +60,25 @@ jobs:
           chmod 600 ~/.ssh/config
 
       - name: Upload artifact to server
-        run: scp urasaber-bot-dist.tar.gz deploy:/tmp/
+        run: scp udonsaber-bot-dist.tar.gz deploy:/tmp/
 
       - name: Swap install dir and restart service
         run: |
           ssh deploy 'bash -se' <<'REMOTE'
           set -euo pipefail
-          cd ~/urasaber-world-bot
+          cd ~/udonsaber-bot
           # Keep tracked files in sync; gitignored config/data is preserved.
           git fetch --all
           git reset --hard origin/main
           # Replace the install dir in place so systemd ExecStart path stays the same.
           mkdir -p build/install
-          rm -rf build/install/urasaber-bot
-          tar -C build/install -xzf /tmp/urasaber-bot-dist.tar.gz
-          rm -f /tmp/urasaber-bot-dist.tar.gz
-          sudo /bin/systemctl restart urasaber-world-bot
+          rm -rf build/install/udonsaber-bot
+          tar -C build/install -xzf /tmp/udonsaber-bot-dist.tar.gz
+          rm -f /tmp/udonsaber-bot-dist.tar.gz
+          sudo /bin/systemctl restart udonsaber-bot
           sleep 5
           # status/health check needs no root — avoids sudoers arg-mismatch and
           # the `| head` SIGPIPE that pipefail would turn into a false failure.
-          systemctl --no-pager --lines=15 status urasaber-world-bot || true
-          systemctl is-active --quiet urasaber-world-bot
+          systemctl --no-pager --lines=15 status udonsaber-bot || true
+          systemctl is-active --quiet udonsaber-bot
           REMOTE

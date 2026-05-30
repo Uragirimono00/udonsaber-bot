@@ -1,23 +1,84 @@
-name: Deploy to VPS
+name: Deploy to self-hosted server
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   workflow_dispatch:
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # Service token used by `cloudflared access ssh` (ProxyCommand below).
+    # Kept in env (not in ssh config) so the secret never lands on disk.
+    env:
+      TUNNEL_SERVICE_TOKEN_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+      TUNNEL_SERVICE_TOKEN_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
     steps:
-      - name: Deploy over SSH
-        uses: appleboy/ssh-action@v1.1.0
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
         with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          script: |
-            set -e
-            cd ~/urasaber-bot
-            git pull
-            ./gradlew installDist -x test
-            sudo systemctl restart urasaber-bot
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build installDist
+        run: ./gradlew installDist --no-daemon
+
+      - name: Package install dir
+        run: tar -C build/install -czf urasaber-bot-dist.tar.gz urasaber-bot
+
+      - name: Install cloudflared
+        run: |
+          curl -fsSL -o cloudflared.deb \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb
+
+      - name: Configure SSH over Cloudflare Tunnel
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          cat > ~/.ssh/config <<EOF
+          Host deploy
+            HostName ${{ secrets.SSH_HOST }}
+            User uragirimono
+            IdentityFile ~/.ssh/id_deploy
+            IdentitiesOnly yes
+            ProxyCommand cloudflared access ssh --hostname %h
+            StrictHostKeyChecking accept-new
+            UserKnownHostsFile ~/.ssh/known_hosts
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Upload artifact to server
+        run: scp urasaber-bot-dist.tar.gz deploy:/tmp/
+
+      - name: Swap install dir and restart service
+        run: |
+          ssh deploy 'bash -se' <<'REMOTE'
+          set -euo pipefail
+          cd ~/urasaber-world-bot
+          # Keep tracked files in sync; gitignored config/data is preserved.
+          git fetch --all
+          git reset --hard origin/main
+          # Replace the install dir in place so systemd ExecStart path stays the same.
+          mkdir -p build/install
+          rm -rf build/install/urasaber-bot
+          tar -C build/install -xzf /tmp/urasaber-bot-dist.tar.gz
+          rm -f /tmp/urasaber-bot-dist.tar.gz
+          sudo /bin/systemctl restart urasaber-world-bot
+          sleep 5
+          # status/health check needs no root — avoids sudoers arg-mismatch and
+          # the `| head` SIGPIPE that pipefail would turn into a false failure.
+          systemctl --no-pager --lines=15 status urasaber-world-bot || true
+          systemctl is-active --quiet urasaber-world-bot
+          REMOTE

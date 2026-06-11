@@ -51,13 +51,13 @@ public class SongRequestCommand extends ListenerAdapter {
         if (!"song-request".equals(ev.getName())) return;
         var mapOpt = ev.getOption("map");
         if (mapOpt == null) {
-            ev.reply("`map` 옵션이 필요합니다.").setEphemeral(true).queue();
+            ev.reply("The `map` option is required.").setEphemeral(true).queue();
             return;
         }
         String key = parseBsrKey(mapOpt.getAsString());
         if (key == null) {
-            ev.reply("⚠️ BeatSaver 링크나 BSR 키를 인식하지 못했어요.\n"
-                    + "예: `4ede8` · `!bsr 4ede8` · `https://beatsaver.com/maps/4ede8`")
+            ev.reply("⚠️ Couldn't recognize a BeatSaver link or BSR key.\n"
+                    + "e.g. `4ede8` · `!bsr 4ede8` · `https://beatsaver.com/maps/4ede8`")
                     .setEphemeral(true).queue();
             return;
         }
@@ -72,7 +72,7 @@ public class SongRequestCommand extends ListenerAdapter {
             try {
                 BeatSaverMapLookup.MapInfo info = lookup.lookup(key);
                 if (info == null) {
-                    hook.editOriginal("⚠️ BeatSaver 에서 `" + key + "` 맵을 찾지 못했어요.").queue();
+                    hook.editOriginal("⚠️ Map `" + key + "` was not found on BeatSaver.").queue();
                     return;
                 }
                 String pageUrl = "https://beatsaver.com/maps/" + key;
@@ -80,7 +80,7 @@ public class SongRequestCommand extends ListenerAdapter {
                 EmbedBuilder eb = new EmbedBuilder()
                         .setColor(EMBED_COLOR)
                         .setTitle(blankDash(info.name()), pageUrl)
-                        .setFooter("신청자: " + requester, requesterAvatar);
+                        .setFooter("Requested by " + requester, requesterAvatar);
 
                 StringBuilder desc = new StringBuilder();
                 if (info.subName() != null && !info.subName().isBlank()) {
@@ -92,14 +92,14 @@ public class SongRequestCommand extends ListenerAdapter {
                 if (info.coverUrl() != null && !info.coverUrl().isBlank()) {
                     eb.setThumbnail(info.coverUrl());
                 }
-                eb.addField("아티스트", blankDash(info.author()), true);
-                eb.addField("매퍼", blankDash(info.mapper()), true);
-                eb.addField("길이", formatDuration(info.duration()), true);
+                eb.addField("Artist", blankDash(info.author()), true);
+                eb.addField("Mapper", blankDash(info.mapper()), true);
+                eb.addField("Length", formatDuration(info.duration()), true);
                 eb.addField("BPM", formatBpm(info.bpm()), true);
 
                 List<Button> buttons = new ArrayList<>(2);
                 if (info.downloadUrl() != null && !info.downloadUrl().isBlank()) {
-                    buttons.add(Button.link(info.downloadUrl(), "⬇️ 다운로드"));
+                    buttons.add(Button.link(info.downloadUrl(), "⬇️ Download"));
                 }
                 buttons.add(Button.link(pageUrl, "🔗 BeatSaver"));
 

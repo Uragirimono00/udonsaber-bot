@@ -1,8 +1,10 @@
 package com.udonsaber.bot.urasaber;
 
+import com.udonsaber.bot.urasaber.api.BeatSaverMapLookup;
 import com.udonsaber.bot.urasaber.api.BplistFetcher;
 import com.udonsaber.bot.urasaber.db.UraSaberDatabase;
 import com.udonsaber.bot.urasaber.discord.PlaylistCommand;
+import com.udonsaber.bot.urasaber.discord.SongRequestCommand;
 import com.udonsaber.bot.urasaber.discord.UraSaberChannelCommand;
 import net.dv8tion.jda.api.JDA;
 import net.dv8tion.jda.api.JDABuilder;
@@ -48,44 +50,49 @@ public class UraSaberBot {
         JDABuilder builder = JDABuilder.createDefault(config.discordToken())
                 .addEventListeners(
                         new UraSaberChannelCommand(uraDb),
-                        new PlaylistCommand(uraDb, bplistFetcher)
+                        new PlaylistCommand(uraDb, bplistFetcher),
+                        new SongRequestCommand(new BeatSaverMapLookup())
                 );
         jda = builder.build();
         jda.awaitReady();
 
-        Command.Choice scoreChoice = new Command.Choice("score (점수)", "score");
-        Command.Choice importChoice = new Command.Choice("import (BSR 콜)", "import");
-        Command.Choice allChoice = new Command.Choice("all (둘 다)", "all");
+        Command.Choice scoreChoice = new Command.Choice("score", "score");
+        Command.Choice importChoice = new Command.Choice("import (BSR call)", "import");
+        Command.Choice allChoice = new Command.Choice("all (both)", "all");
 
         List<SlashCommandData> commands = new ArrayList<>(List.of(
-                Commands.slash("urasaber-channel", "UraSaber 알림 채널 설정 (score / import 분리)")
+                Commands.slash("urasaber-channel", "Set UraSaber notification channels (score / import separately)")
                         .addSubcommands(
-                                new SubcommandData("set", "알림 채널 등록")
-                                        .addOptions(new OptionData(OptionType.STRING, "type", "알림 종류 (기본: all)", false)
+                                new SubcommandData("set", "Register a notification channel")
+                                        .addOptions(new OptionData(OptionType.STRING, "type", "Notification type (default: all)", false)
                                                 .addChoices(scoreChoice, importChoice, allChoice))
-                                        .addOption(OptionType.CHANNEL, "channel", "기본: 현재 채널", false),
-                                new SubcommandData("clear", "알림 등록 해제")
-                                        .addOptions(new OptionData(OptionType.STRING, "type", "해제할 종류 (기본: all)", false)
+                                        .addOption(OptionType.CHANNEL, "channel", "Default: current channel", false),
+                                new SubcommandData("clear", "Unregister notification channels")
+                                        .addOptions(new OptionData(OptionType.STRING, "type", "Type to clear (default: all)", false)
                                                 .addChoices(scoreChoice, importChoice, allChoice)),
-                                new SubcommandData("show", "현재 등록된 알림 채널 상태 보기")
+                                new SubcommandData("show", "Show currently registered notification channels")
                         )
                         .setDefaultPermissions(DefaultMemberPermissions.enabledFor(Permission.MANAGE_CHANNEL))
                         .setGuildOnly(true),
-                Commands.slash("urasaber-playlist", "UraSaber Playlist (bplist) 5-slot 관리")
+                Commands.slash("urasaber-playlist", "Manage UraSaber playlist (bplist) 5 slots")
                         .addSubcommands(
-                                new SubcommandData("add", "bplist 다운 + hash→BSR 매핑 + slot 등록")
-                                        .addOption(OptionType.STRING, "url", "syncURL (bplist 다운로드 주소)", true)
+                                new SubcommandData("add", "Download bplist + map hash to BSR + register to slot")
+                                        .addOption(OptionType.STRING, "url", "syncURL (bplist download URL)", true)
                                         .addOption(OptionType.INTEGER, "slot", "Slot 0..4", true),
-                                new SubcommandData("remove", "Slot 해제 (playlist 데이터는 유지)")
+                                new SubcommandData("remove", "Clear a slot (playlist data is kept)")
                                         .addOption(OptionType.INTEGER, "slot", "Slot 0..4", true),
-                                new SubcommandData("list", "5 slot 상태 보기"),
-                                new SubcommandData("refresh", "Slot 의 syncURL 에서 재다운로드")
+                                new SubcommandData("list", "Show status of all 5 slots"),
+                                new SubcommandData("refresh", "Re-download the slot from its syncURL")
                                         .addOption(OptionType.INTEGER, "slot", "Slot 0..4", true),
-                                new SubcommandData("songs", "Slot 곡 페이지 미리보기")
+                                new SubcommandData("songs", "Preview songs in a slot")
                                         .addOption(OptionType.INTEGER, "slot", "Slot 0..4", true)
-                                        .addOption(OptionType.INTEGER, "page", "0-indexed page (기본 0)", false)
+                                        .addOption(OptionType.INTEGER, "page", "0-indexed page (default 0)", false)
                         )
                         .setDefaultPermissions(DefaultMemberPermissions.enabledFor(Permission.MANAGE_CHANNEL))
+                        .setGuildOnly(true),
+                Commands.slash("song-request", "Request a song — shows BeatSaver map info with a download button")
+                        .addOption(OptionType.STRING, "map",
+                                "BeatSaver link or BSR key (e.g. 4ede8 / !bsr 4ede8)", true)
                         .setGuildOnly(true)
         ));
 

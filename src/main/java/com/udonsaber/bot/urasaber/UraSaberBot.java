@@ -17,6 +17,7 @@ import net.dv8tion.jda.api.interactions.commands.build.Commands;
 import net.dv8tion.jda.api.interactions.commands.build.OptionData;
 import net.dv8tion.jda.api.interactions.commands.build.SlashCommandData;
 import net.dv8tion.jda.api.interactions.commands.build.SubcommandData;
+import net.dv8tion.jda.api.requests.GatewayIntent;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -48,28 +49,32 @@ public class UraSaberBot {
     public void start() throws InterruptedException {
         BplistFetcher bplistFetcher = new BplistFetcher(uraDb);
         JDABuilder builder = JDABuilder.createDefault(config.discordToken())
+                // request 채널의 일반 메시지(!bsr 콜 등)를 읽으려면 privileged intent 필요 —
+                // Discord Developer Portal 에서 Message Content Intent 도 켜야 함.
+                .enableIntents(GatewayIntent.MESSAGE_CONTENT)
                 .addEventListeners(
                         new UraSaberChannelCommand(uraDb),
                         new PlaylistCommand(uraDb, bplistFetcher),
-                        new SongRequestCommand(new BeatSaverMapLookup())
+                        new SongRequestCommand(new BeatSaverMapLookup(), uraDb)
                 );
         jda = builder.build();
         jda.awaitReady();
 
         Command.Choice scoreChoice = new Command.Choice("score", "score");
         Command.Choice importChoice = new Command.Choice("import (BSR call)", "import");
-        Command.Choice allChoice = new Command.Choice("all (both)", "all");
+        Command.Choice requestChoice = new Command.Choice("request (song request channel)", "request");
+        Command.Choice allChoice = new Command.Choice("all (score + import)", "all");
 
         List<SlashCommandData> commands = new ArrayList<>(List.of(
                 Commands.slash("urasaber-channel", "Set UraSaber notification channels (score / import separately)")
                         .addSubcommands(
-                                new SubcommandData("set", "Register a notification channel")
-                                        .addOptions(new OptionData(OptionType.STRING, "type", "Notification type (default: all)", false)
-                                                .addChoices(scoreChoice, importChoice, allChoice))
+                                new SubcommandData("set", "Register a notification / song-request channel")
+                                        .addOptions(new OptionData(OptionType.STRING, "type", "Channel type (default: all)", false)
+                                                .addChoices(scoreChoice, importChoice, requestChoice, allChoice))
                                         .addOption(OptionType.CHANNEL, "channel", "Default: current channel", false),
-                                new SubcommandData("clear", "Unregister notification channels")
+                                new SubcommandData("clear", "Unregister channels")
                                         .addOptions(new OptionData(OptionType.STRING, "type", "Type to clear (default: all)", false)
-                                                .addChoices(scoreChoice, importChoice, allChoice)),
+                                                .addChoices(scoreChoice, importChoice, requestChoice, allChoice)),
                                 new SubcommandData("show", "Show currently registered notification channels")
                         )
                         .setDefaultPermissions(DefaultMemberPermissions.enabledFor(Permission.MANAGE_CHANNEL))

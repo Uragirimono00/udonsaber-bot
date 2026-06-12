@@ -12,11 +12,13 @@ import java.util.List;
 
 /**
  * <pre>
- *   /urasaber-channel set   type:&lt;score|import|all&gt; [channel]   → 알림 채널 등록
- *   /urasaber-channel clear type:&lt;score|import|all&gt;             → 등록 해제
- *   /urasaber-channel show                                       → 현재 등록 상태
+ *   /urasaber-channel set   type:&lt;score|import|request|all&gt; [channel]   → 채널 등록
+ *   /urasaber-channel clear type:&lt;score|import|request|all&gt;             → 등록 해제
+ *   /urasaber-channel show                                               → 현재 등록 상태
  * </pre>
- * type=all 은 score 와 import 둘 다 같은 채널로 등록 / 해제.
+ * type=all 은 score 와 import 둘 다 같은 채널로 등록 (request 는 성격이 달라 명시 등록만).
+ * clear type=all 은 request 포함 전부 해제.
+ * type=request 는 곡 신청 채널 — SongRequestCommand 가 이 채널의 BSR 메시지에 자동 응답.
  */
 public class UraSaberChannelCommand extends ListenerAdapter {
     private static final Logger log = LoggerFactory.getLogger(UraSaberChannelCommand.class);
@@ -53,8 +55,13 @@ public class UraSaberChannelCommand extends ListenerAdapter {
                     db.setNotifyChannel(guildId, UraSaberDatabase.NOTIFY_TYPE_IMPORT, channelId, now);
                     event.reply("✅ UraSaber **임포트(BSR 콜)** 알림 채널이 <#" + channelId + "> 로 설정됐어요.")
                             .setEphemeral(true).queue();
+                } else if (UraSaberDatabase.NOTIFY_TYPE_REQUEST.equals(type)) {
+                    db.setNotifyChannel(guildId, UraSaberDatabase.NOTIFY_TYPE_REQUEST, channelId, now);
+                    event.reply("✅ UraSaber **곡 신청** 채널이 <#" + channelId + "> 로 설정됐어요.\n"
+                            + "이제 이 채널에 BSR 키 / `!bsr` 콜 / BeatSaver 링크만 올려도 자동으로 응답해요.")
+                            .setEphemeral(true).queue();
                 } else {
-                    event.reply("⚠️ type 은 score / import / all 중 하나여야 해요.").setEphemeral(true).queue();
+                    event.reply("⚠️ type 은 score / import / request / all 중 하나여야 해요.").setEphemeral(true).queue();
                 }
             } catch (Exception ex) {
                 log.error("urasaber setNotifyChannel failed", ex);
@@ -67,12 +74,13 @@ public class UraSaberChannelCommand extends ListenerAdapter {
                     db.clearNotifyChannel(guildId, null);
                     event.reply("🗑️ UraSaber 모든 알림 채널 등록을 해제했습니다.").setEphemeral(true).queue();
                 } else if (UraSaberDatabase.NOTIFY_TYPE_SCORE.equals(type)
-                        || UraSaberDatabase.NOTIFY_TYPE_IMPORT.equals(type)) {
+                        || UraSaberDatabase.NOTIFY_TYPE_IMPORT.equals(type)
+                        || UraSaberDatabase.NOTIFY_TYPE_REQUEST.equals(type)) {
                     db.clearNotifyChannel(guildId, type);
-                    event.reply("🗑️ UraSaber **" + type + "** 알림 채널 등록을 해제했습니다.")
+                    event.reply("🗑️ UraSaber **" + type + "** 채널 등록을 해제했습니다.")
                             .setEphemeral(true).queue();
                 } else {
-                    event.reply("⚠️ type 은 score / import / all 중 하나여야 해요.").setEphemeral(true).queue();
+                    event.reply("⚠️ type 은 score / import / request / all 중 하나여야 해요.").setEphemeral(true).queue();
                 }
             } catch (Exception ex) {
                 log.error("urasaber clearNotifyChannel failed", ex);

@@ -249,6 +249,8 @@ public class UraSaberDatabase implements AutoCloseable {
     /** notify_type 상수. 새 타입 추가 시 여기 + Notifier 분기 + Command type choice 셋 다 갱신. */
     public static final String NOTIFY_TYPE_SCORE = "score";
     public static final String NOTIFY_TYPE_IMPORT = "import";
+    /** 곡 신청 채널 — 알림 발송용이 아니라 SongRequestCommand 가 BSR 메시지를 감시하는 채널. */
+    public static final String NOTIFY_TYPE_REQUEST = "request";
 
     /** (guild_id, notify_type) 쌍에 채널 등록 / 갱신. */
     public void setNotifyChannel(String guildId, String notifyType, String channelId, long nowEpochSec) throws SQLException {

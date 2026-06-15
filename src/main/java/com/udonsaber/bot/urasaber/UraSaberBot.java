@@ -55,7 +55,7 @@ public class UraSaberBot {
                 .addEventListeners(
                         new UraSaberChannelCommand(uraDb),
                         new PlaylistCommand(uraDb, bplistFetcher),
-                        new SongRequestCommand(new BeatSaverMapLookup(), uraDb)
+                        new SongRequestCommand(new BeatSaverMapLookup(), uraDb, bplistFetcher)
                 );
         jda = builder.build();
         jda.awaitReady();

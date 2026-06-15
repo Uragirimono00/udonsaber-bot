@@ -85,32 +85,11 @@ public class BplistFetcher {
      * progress 가 null 이 아니면 매 곡 마다 호출됨 — Discord 메시지 갱신 등에 사용.
      */
     public Result fetch(String syncUrl, ProgressListener progress) {
-        if (syncUrl == null || syncUrl.isBlank()) return Result.error("sync_url_empty");
-        if (!(syncUrl.startsWith("http://") || syncUrl.startsWith("https://"))) {
-            return Result.error("sync_url_not_http");
-        }
-
-        // 1. .bplist 다운로드
-        String json;
-        try {
-            HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create(syncUrl))
-                    .header("User-Agent", "UraSaberBot/1.0 (+playlist sync)")
-                    .timeout(Duration.ofSeconds(20))
-                    .GET().build();
-            HttpResponse<byte[]> resp = http.send(req, HttpResponse.BodyHandlers.ofByteArray());
-            if (resp.statusCode() / 100 != 2) {
-                return Result.error("download_failed_http_" + resp.statusCode());
-            }
-            byte[] body = resp.body();
-            if (body == null || body.length == 0) return Result.error("empty_response");
-            if (body.length > MAX_BPLIST_BYTES) return Result.error("bplist_too_large");
-            // Assume UTF-8 JSON (Hitbloq / BeatSaver / ScoreSaber playlists)
-            json = new String(body, StandardCharsets.UTF_8);
-        } catch (Exception e) {
-            log.warn("bplist download failed url={} err={}", syncUrl, e.toString());
-            return Result.error("download_exception_" + safeMsg(e));
-        }
+        // 1. .bplist 다운로드 (URL 검증 + 크기 제한은 download() 공용 헬퍼에서)
+        Download dl = download(syncUrl);
+        if (dl.error != null) return Result.error(dl.error);
+        // Assume UTF-8 JSON (Hitbloq / BeatSaver / ScoreSaber playlists)
+        String json = new String(dl.bytes, StandardCharsets.UTF_8);
 
         // 2. JSON parse (light-weight — 외부 lib 없이 substring 추출)
         String title = extractStringValue(json, "playlistTitle");
@@ -170,6 +149,109 @@ public class BplistFetcher {
             if (d.mapId != null) mapped++;
         }
         return new Result(true, null, title, author, desc, imageB64, songs, drafts.size(), mapped);
+    }
+
+    // ========================================
+    // 경량 fetchRaw — 원본 .bplist 바이트 + 헤더 메타만 (BeatSaver 보강 X)
+    // ========================================
+
+    /** {@link #fetchRaw} 결과 — 원본 .bplist 바이트 + 헤더 메타 + 곡 수. 실패 시 ok=false, error 코드. */
+    public static final class RawResult {
+        public final boolean ok;
+        public final String error;
+        public final String title;
+        public final String author;
+        public final String description;
+        public final int songCount;
+        public final byte[] bytes; // 원본 .bplist 바이트 — Discord 재첨부용
+
+        private RawResult(boolean ok, String error, String title, String author,
+                          String description, int songCount, byte[] bytes) {
+            this.ok = ok;
+            this.error = error;
+            this.title = title;
+            this.author = author;
+            this.description = description;
+            this.songCount = songCount;
+            this.bytes = bytes;
+        }
+
+        static RawResult error(String err) {
+            return new RawResult(false, err, null, null, null, 0, null);
+        }
+    }
+
+    /**
+     * .bplist 다운로드 후 헤더 메타(title/author/description) + 곡 수만 파싱하고 원본 바이트를 그대로 반환.
+     * {@link #fetch} 와 달리 hash→BSR BeatSaver 보강을 하지 않아 빠르고 rate limit 부담이 없다 —
+     * "채널에 playlist 링크 → 같은 .bplist 를 첨부로 돌려줘 전곡 다운로드" 흐름용.
+     */
+    public RawResult fetchRaw(String syncUrl) {
+        Download dl = download(syncUrl);
+        if (dl.error != null) return RawResult.error(dl.error);
+        String json = new String(dl.bytes, StandardCharsets.UTF_8);
+
+        String title = extractStringValue(json, "playlistTitle");
+        String author = extractStringValue(json, "playlistAuthor");
+        if (author == null) author = extractStringValue(json, "owner"); // hitbloq variant
+        String desc = extractStringValue(json, "playlistDescription");
+        int songCount = countSongs(json);
+        return new RawResult(true, null, title, author, desc, songCount, dl.bytes);
+    }
+
+    /** songs[] 배열의 곡(객체) 개수 — 가벼운 substring 워크. 파싱 실패 시 0. */
+    private static int countSongs(String json) {
+        int songsKey = json.indexOf("\"songs\"");
+        if (songsKey < 0) return 0;
+        int arrStart = json.indexOf('[', songsKey);
+        int arrEnd = findMatchingBracket(json, arrStart, '[', ']');
+        if (arrStart < 0 || arrEnd < 0) return 0;
+        int count = 0;
+        int cursor = arrStart + 1;
+        while (cursor < arrEnd) {
+            int objStart = json.indexOf('{', cursor);
+            if (objStart < 0 || objStart >= arrEnd) break;
+            int objEnd = findMatchingBracket(json, objStart, '{', '}');
+            if (objEnd < 0 || objEnd > arrEnd) break;
+            count++;
+            cursor = objEnd + 1;
+        }
+        return count;
+    }
+
+    /** download() 결과 holder — 성공 시 bytes(error=null), 실패 시 error 코드(bytes=null). */
+    private static final class Download {
+        final byte[] bytes;
+        final String error;
+        private Download(byte[] bytes, String error) { this.bytes = bytes; this.error = error; }
+        static Download ok(byte[] b) { return new Download(b, null); }
+        static Download err(String e) { return new Download(null, e); }
+    }
+
+    /** syncUrl 의 .bplist 바이트 다운로드 (URL 검증 + 크기 제한). {@link #fetch}/{@link #fetchRaw} 공용. */
+    private Download download(String syncUrl) {
+        if (syncUrl == null || syncUrl.isBlank()) return Download.err("sync_url_empty");
+        if (!(syncUrl.startsWith("http://") || syncUrl.startsWith("https://"))) {
+            return Download.err("sync_url_not_http");
+        }
+        try {
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(syncUrl))
+                    .header("User-Agent", "UraSaberBot/1.0 (+playlist sync)")
+                    .timeout(Duration.ofSeconds(20))
+                    .GET().build();
+            HttpResponse<byte[]> resp = http.send(req, HttpResponse.BodyHandlers.ofByteArray());
+            if (resp.statusCode() / 100 != 2) {
+                return Download.err("download_failed_http_" + resp.statusCode());
+            }
+            byte[] body = resp.body();
+            if (body == null || body.length == 0) return Download.err("empty_response");
+            if (body.length > MAX_BPLIST_BYTES) return Download.err("bplist_too_large");
+            return Download.ok(body);
+        } catch (Exception e) {
+            log.warn("bplist download failed url={} err={}", syncUrl, e.toString());
+            return Download.err("download_exception_" + safeMsg(e));
+        }
     }
 
     /** 파싱 중간 단계의 가변 곡 holder — 캐시/BeatSaver 보강 후 PlaylistSongRow 로 변환. */

@@ -117,38 +117,14 @@ public final class BsorWriter {
             wQuat(f.rqx, f.rqy, f.rqz, f.rqw);
         }
 
-        // ---- block 2: notes ----
-        // good/bad 이벤트만 기록(미스는 위치/방향 미상이라 생략 — ArcViewer 가 맵 노트로 표시).
+        // ---- block 2: notes (비움) ----
+        // ★ ArcViewer 는 노트 이벤트를 맵 노트와 (1) spawnTime ≈ TimeFromBeat(noteBeat) 1ms 오차 +
+        //    (2) noteID 로 매칭한다(ObjectManager.cs). 우리 이벤트 time 은 "컷(히트) 시각을 20ms 양자화"한
+        //    값이라 노트의 정확한 beat 시각과 안 맞아 전부 미스매치 → "Couldn't match N replay notes" +
+        //    추정 위치로 이상한 컷이 그려졌다. 노트의 예정 시각(초, ms 정밀)을 인월드에서 정확히 캡처해
+        //    보내기 전까지는 노트 블록을 비워 아바타 고스트만(맵 노트는 ArcViewer 가 맵에서 그대로 표시).
         wByte(2);
-        ReplaySubmissionCodec.Event[] events = sub.events != null ? sub.events : new ReplaySubmissionCodec.Event[0];
-        int noteCount = 0;
-        for (ReplaySubmissionCodec.Event e : events) if (e.isGoodOrBad()) noteCount++;
-        wInt(noteCount);
-        for (ReplaySubmissionCodec.Event e : events) {
-            if (!e.isGoodOrBad()) continue;
-            int noteID = SCORING_TYPE_NORMAL * 10000 + e.line * 1000 + e.layer * 100 + e.color * 10 + e.cutDir;
-            wInt(noteID);
-            wFloat(e.time);            // eventTime
-            wFloat(e.time);            // spawnTime (정확한 스폰시각 미상 → 히트시각으로 근사)
-            int eventType = (e.kind == ReplaySubmissionCodec.KIND_GOOD) ? 0 : 1;  // 0=good,1=bad
-            wInt(eventType);
-            // NoteCutInfo (good/bad 만) — 고스트라 대부분 중립/0, 등급만 pre/post 로 복원.
-            wBool(true);               // speedOK
-            wBool(true);               // directionOK
-            wBool(true);               // saberTypeOK
-            wBool(false);              // wasCutTooSoon
-            wFloat(0f);                // saberSpeed
-            wVec(0f, 0f, 0f);          // saberDir
-            wInt(e.color);             // saberType (0=left/red,1=right/blue)
-            wFloat(0f);                // timeDeviation
-            wFloat(0f);                // cutDirDeviation
-            wVec(0f, 0f, 0f);          // cutPoint
-            wVec(0f, 0f, 0f);          // cutNormal
-            wFloat(0f);                // cutDistanceToCenter
-            wFloat(0f);                // cutAngle
-            wFloat(Math.min(1f, e.pre / 70f));   // beforeCutRating
-            wFloat(Math.min(1f, e.post / 30f));  // afterCutRating
-        }
+        wInt(0);
 
         // ---- block 3: walls ----
         wByte(3);

@@ -1763,9 +1763,31 @@ public class UraSaberHttpApi {
         if (nick == null) nick = "Anon-" + ip.replace('.', '_').replace(':', '_');
         if (nick.length() > 64) nick = nick.substring(0, 64);
 
+        // 같은 플레이(=같은 페이로드) 재제출 멱등 처리.
+        //   .bsor 파일명에 제출시각 대신 "페이로드 내용 해시"를 박는다 → 같은 링크 재제출이면 같은 파일명.
+        //   그 파일이 이미 있으면(=이전에 제출됨) DB 인서트/Discord 알림/파일 저장을 전부 skip 하고 링크만 반환.
+        //   (파일이 영속 dedup 키. 서로 다른 플레이는 해시가 달라 각각 1회씩 정상 집계됨.)
+        String safeNick = nick.replaceAll("[^a-zA-Z0-9._-]", "_");
+        if (safeNick.length() > 24) safeNick = safeNick.substring(0, 24);
+        String replayFile = sub.hasFrames()
+                ? (safeNick + "_" + mapId + "_d" + sub.diff + "_" + shortHash(raw) + ".bsor")
+                : null;
+        if (replayFile != null && Files.exists(java.nio.file.Paths.get("data", "replays").resolve(replayFile))) {
+            String dupArc = buildArcViewerUrl(ex, mapId, replayFile);
+            StringBuilder dupJson = new StringBuilder(220);
+            dupJson.append("{\"ok\":true,\"duplicate\":true,\"replay\":").append(jsonString(replayFile));
+            if (dupArc != null) dupJson.append(",\"arcViewer\":").append(jsonString(dupArc));
+            dupJson.append("}");
+            log.info("[submit-bin] duplicate re-submit (replay exists) — skip insert: {}", replayFile);
+            respond(ex, 200, "application/json; charset=utf-8", dupJson.toString());
+            return;
+        }
+
         long nowSec = Instant.now().getEpochSecond();
         long playerId = db.upsertPlayer(nick, nowSec);
-        if (db.isDuplicateRecent(playerId, mapId, character, diff, score, nowSec - DEDUP_WINDOW_SECONDS)) {
+        // 점수만(프레임 없는) 제출의 빠른 중복은 기존 10초 창으로 — replayFile==null 케이스 폴백.
+        if (replayFile == null
+                && db.isDuplicateRecent(playerId, mapId, character, diff, score, nowSec - DEDUP_WINDOW_SECONDS)) {
             respond(ex, 200, "application/json; charset=utf-8", "{\"ok\":true,\"duplicate\":true}"); return;
         }
 
@@ -1783,6 +1805,10 @@ public class UraSaberHttpApi {
                 } catch (Exception e) { log.warn("[submit-bin] upsertSong failed {}: {}", mapId, e.toString()); }
             }
             noteCount = importer.getDiffNoteCount(mapId, diff <= 4 ? diff : 4);
+            // ArcViewer 리플레이 reaction time = (info.jumpDistance / 2) / NJS. RT=500ms 로 보이게
+            // BSOR jumpDistance = 맵 NJS 로 둔다(RT = NJS/2/NJS = 0.5s). NJS 못 구하면 페이로드 값 유지.
+            Float njs = importer.getDiffNjs(mapId, diff <= 4 ? diff : 4);
+            if (njs != null && njs > 0f) sub.jumpDistance = njs;
         } catch (Exception e) {
             log.warn("[submit-bin] BeatSaver lookup failed {}: {}", mapId, e.toString());
         }
@@ -1810,25 +1836,18 @@ public class UraSaberHttpApi {
                 nowSec, nowSec, ip,
                 sub.good, sub.bad, sub.miss, noteCount, country);
 
-        // 아바타 고스트 .bsor 저장 (프레임이 있을 때만).
-        String replayFile = null;
-        try {
-            replayFile = saveBsor(sub, hash, songName, mapper, modifiersStr, nowSec, nick, mapId);
-        } catch (Exception e) {
-            log.warn("[submit-bin] bsor save failed: {}", e.toString());
+        // 아바타 고스트 .bsor 저장 (프레임 있을 때만, 위에서 정한 해시 파일명으로). 저장 실패 시 링크 없음.
+        if (replayFile != null) {
+            try {
+                saveBsorAs(sub, hash, mapId, songName, mapper, modifiersStr, nowSec, replayFile);
+            } catch (Exception e) {
+                log.warn("[submit-bin] bsor save failed: {}", e.toString());
+                replayFile = null;
+            }
         }
 
-        // ArcViewer 리플레이 보기 링크 — 봇이 서빙하는 .bsor URL 을 ArcViewer ?replayURL= 로 전달.
-        //   ?id=<bsr> 로 맵도 같이 로드(난이도/모드는 .bsor info 에서 읽음). noProxy=true → ArcViewer 가
-        //   우리 서버에서 직접 fetch(우리가 CORS 허용). 프레임 없으면 링크 없음.
-        String arcViewerUrl = null;
-        if (replayFile != null) {
-            String replayFileUrl = publicBaseUrl(ex) + "/urasaber/api/replay?f="
-                    + java.net.URLEncoder.encode(replayFile, StandardCharsets.UTF_8);
-            arcViewerUrl = "https://allpoland.github.io/ArcViewer/?id=" + mapId
-                    + "&replayURL=" + java.net.URLEncoder.encode(replayFileUrl, StandardCharsets.UTF_8)
-                    + "&noProxy=true";
-        }
+        // ArcViewer 리플레이 보기 링크 (프레임/저장 성공 시).
+        String arcViewerUrl = (replayFile != null) ? buildArcViewerUrl(ex, mapId, replayFile) : null;
 
         if (notifier != null) {
             pushNotification(nick, mapId, songName, songAuthor, character, diff,
@@ -1849,18 +1868,35 @@ public class UraSaberHttpApi {
         respond(ex, 200, "application/json; charset=utf-8", b.toString());
     }
 
-    /** 제출 페이로드 → .bsor 파일로 저장(data/replays/). 프레임 없으면(점수만) null. 반환=파일명. */
-    private String saveBsor(ReplaySubmissionCodec.Submission sub, String hash, String songName, String mapper,
-                            String modifiersStr, long nowSec, String nick, String mapId) throws IOException {
-        if (!sub.hasFrames()) return null;
+    /** 제출 페이로드 → 지정 파일명으로 .bsor 저장(data/replays/). 호출 측이 안정적(해시) 파일명을 정함. */
+    private void saveBsorAs(ReplaySubmissionCodec.Submission sub, String hash, String mapId, String songName,
+                            String mapper, String modifiersStr, long nowSec, String replayFile) throws IOException {
         byte[] bsor = BsorWriter.toBsor(sub, hash, mapId, songName, mapper, modifiersStr, nowSec);
         java.nio.file.Path dir = java.nio.file.Paths.get("data", "replays");
         Files.createDirectories(dir);
-        String safeNick = nick.replaceAll("[^a-zA-Z0-9._-]", "_");
-        if (safeNick.length() > 24) safeNick = safeNick.substring(0, 24);
-        String fname = safeNick + "_" + mapId + "_d" + sub.diff + "_" + nowSec + ".bsor";
-        Files.write(dir.resolve(fname), bsor);
-        return fname;
+        Files.write(dir.resolve(replayFile), bsor);
+    }
+
+    /** ArcViewer 리플레이 보기 링크 — 우리 서버가 서빙하는 .bsor 를 ?replayURL= 로, 맵은 ?id= 로. */
+    private static String buildArcViewerUrl(HttpExchange ex, String mapId, String replayFile) {
+        if (replayFile == null) return null;
+        String replayFileUrl = publicBaseUrl(ex) + "/urasaber/api/replay?f="
+                + java.net.URLEncoder.encode(replayFile, StandardCharsets.UTF_8);
+        return "https://allpoland.github.io/ArcViewer/?id=" + mapId
+                + "&replayURL=" + java.net.URLEncoder.encode(replayFileUrl, StandardCharsets.UTF_8)
+                + "&noProxy=true";
+    }
+
+    /** 페이로드 내용 해시(SHA-256 앞 8바이트, 16 hex) — 같은 플레이 재제출 dedup 키. */
+    private static String shortHash(byte[] data) {
+        try {
+            byte[] h = java.security.MessageDigest.getInstance("SHA-256").digest(data);
+            StringBuilder sb = new StringBuilder(16);
+            for (int i = 0; i < 8; i++) sb.append(String.format("%02x", h[i]));
+            return sb.toString();
+        } catch (Exception e) {
+            return Integer.toHexString(java.util.Arrays.hashCode(data));
+        }
     }
 
     /**

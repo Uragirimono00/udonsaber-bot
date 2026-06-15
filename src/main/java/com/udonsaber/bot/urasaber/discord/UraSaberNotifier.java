@@ -200,7 +200,7 @@ public class UraSaberNotifier {
 
         // ArcViewer 리플레이 보기 링크 (있을 때만)
         if (ev.arcViewerUrl() != null && !ev.arcViewerUrl().isBlank()) {
-            eb.addField("리플레이", "[▶ ArcViewer 에서 보기](" + ev.arcViewerUrl() + ")", false);
+            eb.addField("Replay", "[▶ Watch Replay](" + ev.arcViewerUrl() + ")", false);
         }
 
         if (ev.mapId() != null && !ev.mapId().isBlank()) {

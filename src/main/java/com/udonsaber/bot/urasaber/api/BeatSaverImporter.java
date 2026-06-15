@@ -354,11 +354,14 @@ public final class BeatSaverImporter {
 
         // 8. diff 별 note count 캐싱 (standard index 0..4 매핑). 봇이 commit-score 에서 lookup.
         int[] noteCountByStd = new int[5];
+        float[] njsByStd = new float[5];
         for (DiffParsed dp : diffs) {
             int std = rankToStdDiff(dp.meta.difficultyRank);
             if (std >= 0 && std < 5) {
                 // 여러 characteristic 가 같은 std 에 매핑되면 최대값 (Standard 가 보통 가장 많음)
                 if (dp.notes.size() > noteCountByStd[std]) noteCountByStd[std] = dp.notes.size();
+                // NJS: Standard characteristic 우선 (없으면 첫 값). ArcViewer 의 _currentDifficulty.noteJumpSpeed 와 동일 소스.
+                if (njsByStd[std] <= 0f || "Standard".equalsIgnoreCase(dp.meta.characteristic)) njsByStd[std] = dp.meta.njs;
             }
         }
 
@@ -370,7 +373,7 @@ public final class BeatSaverImporter {
         }
 
         cache.put(key, new CachedEntry(now, json, audioUrl, imp.audioPath, imp.audioContentType,
-                zipUrl, meta, coverBlob, noteCountByStd));
+                zipUrl, meta, coverBlob, noteCountByStd, njsByStd));
         return Result.ok(json, audioUrl, meta);
     }
 
@@ -434,6 +437,20 @@ public final class BeatSaverImporter {
         }
         int n = e.noteCountByStdDiff[standardDiffIndex];
         return n > 0 ? n : null;
+    }
+
+    /** 특정 BSR + standard diff(0..4)의 NJS(noteJumpSpeed). 캐시 miss 면 importMap 트리거. 없으면 null. */
+    public Float getDiffNjs(String bsr, int standardDiffIndex) {
+        if (!isValidBsr(bsr)) return null;
+        if (standardDiffIndex < 0 || standardDiffIndex >= 5) return null;
+        CachedEntry e = cache.get(bsr.toLowerCase());
+        if (e == null || e.njsByStdDiff == null) {
+            importMap(bsr);
+            e = cache.get(bsr.toLowerCase());
+            if (e == null || e.njsByStdDiff == null) return null;
+        }
+        float njs = e.njsByStdDiff[standardDiffIndex];
+        return njs > 0f ? njs : null;
     }
 
     /** BeatSaver difficulty rank (1/3/5/7/9) → 표준 인덱스 (0..4). */
@@ -1725,9 +1742,11 @@ public final class BeatSaverImporter {
         final SongMeta meta;
         final ImageBlob coverBlob;         // nullable
         final int[] noteCountByStdDiff;    // size 5, 0..4 index → note count
+        final float[] njsByStdDiff;        // size 5, 0..4 index → NJS (Standard 우선). ArcViewer RT 계산용.
 
         CachedEntry(long timestamp, String json, String audioUrl, Path audioPath, String audioContentType,
-                    String externalZipUrl, SongMeta meta, ImageBlob coverBlob, int[] noteCountByStdDiff) {
+                    String externalZipUrl, SongMeta meta, ImageBlob coverBlob, int[] noteCountByStdDiff,
+                    float[] njsByStdDiff) {
             this.timestamp = timestamp;
             this.json = json;
             this.audioUrl = audioUrl;
@@ -1737,6 +1756,7 @@ public final class BeatSaverImporter {
             this.meta = meta;
             this.coverBlob = coverBlob;
             this.noteCountByStdDiff = noteCountByStdDiff;
+            this.njsByStdDiff = njsByStdDiff;
         }
     }
 

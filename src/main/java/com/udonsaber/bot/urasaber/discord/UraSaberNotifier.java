@@ -49,7 +49,8 @@ public class UraSaberNotifier {
             String country,
             long playedAt,
             String coverUrl,
-            Integer mapNoteCount
+            Integer mapNoteCount,
+            String arcViewerUrl   // ArcViewer 리플레이 보기 링크 (없으면 null)
     ) {}
 
     /** 월드에서 BSR 코드로 BeatSaver 곡을 콜했을 때 알림에 쓰이는 이벤트. */
@@ -195,6 +196,11 @@ public class UraSaberNotifier {
             String miss = ev.miss()    == null ? "—" : ev.miss().toString();
             eb.addField("Good · Bad · Miss",
                     "✅ " + good + "  ·  ⚠️ " + bad + "  ·  ❌ " + miss, true);
+        }
+
+        // ArcViewer 리플레이 보기 링크 (있을 때만)
+        if (ev.arcViewerUrl() != null && !ev.arcViewerUrl().isBlank()) {
+            eb.addField("리플레이", "[▶ ArcViewer 에서 보기](" + ev.arcViewerUrl() + ")", false);
         }
 
         if (ev.mapId() != null && !ev.mapId().isBlank()) {

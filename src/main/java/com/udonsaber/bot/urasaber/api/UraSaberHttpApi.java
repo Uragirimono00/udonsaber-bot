@@ -231,6 +231,8 @@ public class UraSaberHttpApi {
         server.createContext("/urasaber/api/song",        this::handleSong);
         server.createContext("/urasaber/api/songs",       this::handleSongs);
         server.createContext("/urasaber/api/submit",      this::handleSubmit);
+        // 저장된 리플레이(.bsor) 서빙 — ArcViewer 가 ?replayURL= 로 fetch (CORS 허용).
+        server.createContext("/urasaber/api/replay",       this::handleReplay);
         // BeatSaver 외부곡 import — 월드가 GET 으로 BSR 코드를 보내면 파싱된 JSON 반환.
         server.createContext("/urasaber/api/import",       this::handleImport);
         // 같은 BSR 의 오디오 (캐시된 .egg/.ogg 바이트). VRChat AVPro 가 직접 재생.
@@ -1280,7 +1282,7 @@ public class UraSaberHttpApi {
             if (notifier != null) {
                 pushNotification(nick, mapId, null, null, character, diff,
                         score, accuracy, null, maxCombo, null, null, null, noteCount,
-                        fc, rank, personalBest, country, nowSec);
+                        fc, rank, personalBest, country, nowSec, null);
             }
 
             respond(ex, 200, "application/json; charset=utf-8", "{\"ok\":true,\"score\":" + score + "}");
@@ -1714,7 +1716,7 @@ public class UraSaberHttpApi {
             if (notifier != null) {
                 pushNotification(nick, mapId, songName, songAuthor, character, diff,
                         score, accuracy, combo, maxCombo, goodCut, badCut, miss, noteCount,
-                        fc, rank, personalBest, country, ts);
+                        fc, rank, personalBest, country, ts, null);
             }
 
             respond(ex, 200, "application/json; charset=utf-8",
@@ -1816,10 +1818,22 @@ public class UraSaberHttpApi {
             log.warn("[submit-bin] bsor save failed: {}", e.toString());
         }
 
+        // ArcViewer 리플레이 보기 링크 — 봇이 서빙하는 .bsor URL 을 ArcViewer ?replayURL= 로 전달.
+        //   ?id=<bsr> 로 맵도 같이 로드(난이도/모드는 .bsor info 에서 읽음). noProxy=true → ArcViewer 가
+        //   우리 서버에서 직접 fetch(우리가 CORS 허용). 프레임 없으면 링크 없음.
+        String arcViewerUrl = null;
+        if (replayFile != null) {
+            String replayFileUrl = publicBaseUrl(ex) + "/urasaber/api/replay?f="
+                    + java.net.URLEncoder.encode(replayFile, StandardCharsets.UTF_8);
+            arcViewerUrl = "https://allpoland.github.io/ArcViewer/?id=" + mapId
+                    + "&replayURL=" + java.net.URLEncoder.encode(replayFileUrl, StandardCharsets.UTF_8)
+                    + "&noProxy=true";
+        }
+
         if (notifier != null) {
             pushNotification(nick, mapId, songName, songAuthor, character, diff,
                     score, accuracy, null, maxCombo, sub.good, sub.bad, sub.miss, noteCount,
-                    sub.fullCombo, rank, personalBest, country, nowSec);
+                    sub.fullCombo, rank, personalBest, country, nowSec, arcViewerUrl);
         }
 
         log.info("[submit-bin] ip={} nick='{}' map={} diff={} score={} acc={} frames={} events={} replay={}",
@@ -1847,6 +1861,46 @@ public class UraSaberHttpApi {
         String fname = safeNick + "_" + mapId + "_d" + sub.diff + "_" + nowSec + ".bsor";
         Files.write(dir.resolve(fname), bsor);
         return fname;
+    }
+
+    /**
+     * 저장된 .bsor 서빙 — ArcViewer 가 ?replayURL= 로 fetch. CORS 허용(브라우저 직접 fetch).
+     * data/replays 안의 파일만(basename 강제 + .bsor 확장자) — path traversal 방지.
+     */
+    private void handleReplay(HttpExchange ex) throws IOException {
+        ex.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
+        if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) { respond(ex, 204, "text/plain", ""); return; }
+        if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) { respond(ex, 405, "text/plain", "Method Not Allowed"); return; }
+
+        boolean headersSent = false;
+        try {
+            Map<String, String> qs = parseQuery(ex.getRequestURI().getRawQuery());
+            String f = nullIfBlank(qs.get("f"));
+            if (f == null) { respond(ex, 400, "text/plain", "f required"); return; }
+            f = java.nio.file.Paths.get(f).getFileName().toString();  // basename only (traversal 방지)
+            if (!f.toLowerCase().endsWith(".bsor")) { respond(ex, 400, "text/plain", "bad file"); return; }
+
+            java.nio.file.Path file = java.nio.file.Paths.get("data", "replays").resolve(f);
+            if (!Files.exists(file)) { respond(ex, 404, "text/plain", "not found"); return; }
+
+            byte[] bytes = Files.readAllBytes(file);
+            ex.getResponseHeaders().set("Content-Type", "application/octet-stream");
+            ex.sendResponseHeaders(200, bytes.length);
+            headersSent = true;
+            try (OutputStream os = ex.getResponseBody()) { os.write(bytes); }
+        } catch (Exception e) {
+            if (!headersSent) {
+                log.warn("/urasaber/api/replay failed", e);
+                try { respond(ex, 500, "text/plain", "internal"); } catch (Exception ignore) {}
+            }
+        }
+    }
+
+    /** 공개 베이스 URL — 들어온 요청의 Host 헤더(클라가 호출한 도메인) 기준. 없으면 기본 도메인. */
+    private static String publicBaseUrl(HttpExchange ex) {
+        String host = ex.getRequestHeaders().getFirst("Host");
+        if (host != null && !host.isBlank()) return "https://" + host;
+        return "https://api.ura-s.org";
     }
 
     /** 모디파이어 비트마스크(BSConstants.MOD_*) → BeatLeader 스타일 콤마 태그. 없으면 null. */
@@ -1878,7 +1932,7 @@ public class UraSaberHttpApi {
                                   int score, Double accuracy, Integer combo, Integer maxCombo,
                                   Integer goodCut, Integer badCut, Integer miss, Integer noteCount,
                                   boolean fc, String rank, boolean personalBest, String country,
-                                  long playedAt) {
+                                  long playedAt, String arcViewerUrl) {
         try {
             if (songName == null || songAuthor == null) {
                 var songOpt = db.getSong(mapId);
@@ -1894,7 +1948,7 @@ public class UraSaberHttpApi {
                     character, diff, score, accuracy,
                     combo, maxCombo, goodCut, badCut, miss, noteCount,
                     fc, rank, personalBest, country, playedAt,
-                    fm.coverUrl(), fm.noteCount()));
+                    fm.coverUrl(), fm.noteCount(), arcViewerUrl));
         } catch (Exception e) {
             log.warn("urasaber notify push failed: {}", e.getMessage());
         }

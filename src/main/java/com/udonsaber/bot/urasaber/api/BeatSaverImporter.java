@@ -262,9 +262,10 @@ public final class BeatSaverImporter {
         String mapJson = httpGet("https://api.beatsaver.com/maps/id/" + URLEncoder.encode(key, StandardCharsets.UTF_8));
         if (mapJson == null) return Result.error(404, "beatsaver_not_found");
 
-        // versions[0].downloadURL + versions[0].coverURL 추출
+        // versions[0].downloadURL + versions[0].coverURL + versions[0].hash 추출
         String zipUrl = extractFirstString(mapJson, "\"downloadURL\"");
         String coverUrl = extractFirstString(mapJson, "\"coverURL\"");
+        String mapHash = extractFirstString(mapJson, "\"hash\"");  // BSOR info.hash (자동 맵 매칭)
         if (zipUrl == null) return Result.error(502, "no_download_url");
 
         // 곡 메타 (메타 API 의 metadata 객체)
@@ -339,7 +340,7 @@ public final class BeatSaverImporter {
         }
 
         SongMeta meta = new SongMeta(key, info.songName, info.songAuthor, info.mapper,
-                coverUrl, info.bpm, metaDuration == null ? 0.0 : metaDuration);
+                coverUrl, info.bpm, metaDuration == null ? 0.0 : metaDuration, mapHash);
 
         // 7. 커버 바이트 best-effort 다운로드 — 실패해도 import 자체는 성공으로 두고 cover 없이 진행.
         ImageBlob coverBlob = null;
@@ -1649,9 +1650,10 @@ public final class BeatSaverImporter {
         public final String coverUrl;
         public final double bpm;
         public final double duration;
+        public final String hash;   // versions[0].hash (SHA1) — BSOR info.hash 자동 맵 매칭용. 없으면 "".
 
         public SongMeta(String bsr, String songName, String songAuthor, String mapper,
-                        String coverUrl, double bpm, double duration) {
+                        String coverUrl, double bpm, double duration, String hash) {
             this.bsr = bsr;
             this.songName = songName;
             this.songAuthor = songAuthor;
@@ -1659,6 +1661,7 @@ public final class BeatSaverImporter {
             this.coverUrl = coverUrl;
             this.bpm = bpm;
             this.duration = duration;
+            this.hash = hash == null ? "" : hash;
         }
     }
 

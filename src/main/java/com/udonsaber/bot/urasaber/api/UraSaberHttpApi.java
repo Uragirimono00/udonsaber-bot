@@ -1611,6 +1611,12 @@ public class UraSaberHttpApi {
             // payload 필드 순서 (U# 와 정확히 일치): nick|map|char|diff|score|acc|combo|maxCombo|good|bad|miss|total|noteCount|fc|rank|ts
             String dataParam = nullIfBlank(q.get("d"));
             if (dataParam != null) {
+                // 신 바이너리 포맷(리플레이+점수, magic 0xB5 0x53) 우선 감지 → 별도 처리.
+                byte[] rawBin = ReplaySubmissionCodec.decodeUrlSafeBase64(dataParam);
+                if (ReplaySubmissionCodec.isBinaryPayload(rawBin)) {
+                    handleBinarySubmission(ex, ip, rawBin);
+                    return;
+                }
                 Map<String, String> unpacked = unpackBase64Payload(dataParam);
                 if (unpacked == null) {
                     respond(ex, 400, "application/json; charset=utf-8", "{\"ok\":false,\"error\":\"bad_d_param\"}");
@@ -1717,6 +1723,143 @@ public class UraSaberHttpApi {
             log.error("/urasaber/api/submit failed", e);
             respond(ex, 500, "application/json; charset=utf-8", "{\"ok\":false,\"error\":\"server\"}");
         }
+    }
+
+    /**
+     * 신 바이너리 제출(리플레이+점수). magic 0xB5 0x53. (rate limit / GET 체크는 handleSubmit 에서 이미 수행)
+     *  - 점수/통계 → ura_play 인서트 (실제 good/bad/miss/maxCombo/fc — 기존 multi-call 보다 정확).
+     *  - 아바타 고스트 .bsor 생성 → data/replays/ 저장 (ArcViewer 재생용). 노트 오버레이는 후속.
+     */
+    private void handleBinarySubmission(HttpExchange ex, String ip, byte[] raw) throws Exception {
+        ReplaySubmissionCodec.Submission sub = ReplaySubmissionCodec.decode(raw);
+        if (sub == null) {
+            respond(ex, 400, "application/json; charset=utf-8", "{\"ok\":false,\"error\":\"bad_payload\"}");
+            return;
+        }
+
+        String mapId = nullIfBlank(sub.mapId);
+        if (mapId == null || !BeatSaverImporter.isValidBsr(mapId)) {
+            respond(ex, 422, "application/json; charset=utf-8", "{\"ok\":false,\"error\":\"bad_map\"}"); return;
+        }
+        if (sub.score < 0) {
+            respond(ex, 422, "application/json; charset=utf-8", "{\"ok\":false,\"error\":\"score_negative\"}"); return;
+        }
+        double accuracy = sub.accuracy();
+        if (accuracy < 0 || accuracy > 100) {
+            respond(ex, 422, "application/json; charset=utf-8", "{\"ok\":false,\"error\":\"acc_oob\"}"); return;
+        }
+        if (sub.diff < 0 || sub.diff > 9) {
+            respond(ex, 422, "application/json; charset=utf-8", "{\"ok\":false,\"error\":\"diff_oob\"}"); return;
+        }
+
+        int charIdx = sub.charIdx;
+        String character = (charIdx >= 0 && charIdx < CHARACTERISTICS.length) ? CHARACTERISTICS[charIdx] : "Standard";
+        int diff = sub.diff;
+        int score = sub.score;
+
+        String nick = nullIfBlank(sub.playerName);
+        if (nick == null) nick = "Anon-" + ip.replace('.', '_').replace(':', '_');
+        if (nick.length() > 64) nick = nick.substring(0, 64);
+
+        long nowSec = Instant.now().getEpochSecond();
+        long playerId = db.upsertPlayer(nick, nowSec);
+        if (db.isDuplicateRecent(playerId, mapId, character, diff, score, nowSec - DEDUP_WINDOW_SECONDS)) {
+            respond(ex, 200, "application/json; charset=utf-8", "{\"ok\":true,\"duplicate\":true}"); return;
+        }
+
+        // BeatSaver 메타 (곡명/매퍼/노트수/hash) — ura_song upsert + .bsor info 채움.
+        String songName = null, mapper = null, songAuthor = null, hash = "";
+        Integer noteCount = null;
+        try {
+            BeatSaverImporter.Result r = importer.importMap(mapId);
+            if (r != null && r.ok && r.meta != null) {
+                songName = r.meta.songName; songAuthor = r.meta.songAuthor; mapper = r.meta.mapper;
+                hash = r.meta.hash;
+                try {
+                    db.upsertSong(mapId, songName, null, songAuthor, mapper,
+                            r.meta.bpm > 0 ? r.meta.bpm : null, r.meta.duration > 0 ? r.meta.duration : null, nowSec);
+                } catch (Exception e) { log.warn("[submit-bin] upsertSong failed {}: {}", mapId, e.toString()); }
+            }
+            noteCount = importer.getDiffNoteCount(mapId, diff <= 4 ? diff : 4);
+        } catch (Exception e) {
+            log.warn("[submit-bin] BeatSaver lookup failed {}: {}", mapId, e.toString());
+        }
+
+        int hit = sub.good + sub.bad;            // 실제로 친 노트 수
+        int total = sub.good + sub.bad + sub.miss;
+        Integer maxCombo = sub.maxCombo > 0 ? sub.maxCombo : null;
+        String rank = rankFromAcc(accuracy);
+        String modifiersStr = modifiersMaskToString(sub.modifiers);  // DA/GN/NA/FEET/TRICK/DASMOL
+
+        String country = null;
+        try {
+            country = db.getPlayerCountry(playerId);
+            if (country == null || country.isBlank()) {
+                country = geo.lookup(ip);
+                if (country != null) db.updatePlayerCountry(playerId, country);
+            }
+        } catch (Exception ignored) {}
+
+        int prevBest = previousBestScore(playerId, mapId, character, diff);
+        boolean personalBest = (prevBest < 0) || (score > prevBest);
+
+        long playId = db.insertPlay(playerId, mapId, character, diff,
+                score, accuracy, null, maxCombo, hit, total, rank, sub.fullCombo, modifiersStr,
+                nowSec, nowSec, ip,
+                sub.good, sub.bad, sub.miss, noteCount, country);
+
+        // 아바타 고스트 .bsor 저장 (프레임이 있을 때만).
+        String replayFile = null;
+        try {
+            replayFile = saveBsor(sub, hash, songName, mapper, modifiersStr, nowSec, nick, mapId);
+        } catch (Exception e) {
+            log.warn("[submit-bin] bsor save failed: {}", e.toString());
+        }
+
+        if (notifier != null) {
+            pushNotification(nick, mapId, songName, songAuthor, character, diff,
+                    score, accuracy, null, maxCombo, sub.good, sub.bad, sub.miss, noteCount,
+                    sub.fullCombo, rank, personalBest, country, nowSec);
+        }
+
+        log.info("[submit-bin] ip={} nick='{}' map={} diff={} score={} acc={} frames={} events={} replay={}",
+                ip, nick, mapId, diff, score, accuracy,
+                sub.frames != null ? sub.frames.length : 0,
+                sub.events != null ? sub.events.length : 0, replayFile);
+
+        StringBuilder b = new StringBuilder(160);
+        b.append("{\"ok\":true,\"playId\":").append(playId);
+        b.append(",\"personalBest\":").append(personalBest);
+        if (replayFile != null) b.append(",\"replay\":").append(jsonString(replayFile));
+        b.append("}");
+        respond(ex, 200, "application/json; charset=utf-8", b.toString());
+    }
+
+    /** 제출 페이로드 → .bsor 파일로 저장(data/replays/). 프레임 없으면(점수만) null. 반환=파일명. */
+    private String saveBsor(ReplaySubmissionCodec.Submission sub, String hash, String songName, String mapper,
+                            String modifiersStr, long nowSec, String nick, String mapId) throws IOException {
+        if (!sub.hasFrames()) return null;
+        byte[] bsor = BsorWriter.toBsor(sub, hash, mapId, songName, mapper, modifiersStr, nowSec);
+        java.nio.file.Path dir = java.nio.file.Paths.get("data", "replays");
+        Files.createDirectories(dir);
+        String safeNick = nick.replaceAll("[^a-zA-Z0-9._-]", "_");
+        if (safeNick.length() > 24) safeNick = safeNick.substring(0, 24);
+        String fname = safeNick + "_" + mapId + "_d" + sub.diff + "_" + nowSec + ".bsor";
+        Files.write(dir.resolve(fname), bsor);
+        return fname;
+    }
+
+    /** 모디파이어 비트마스크(BSConstants.MOD_*) → BeatLeader 스타일 콤마 태그. 없으면 null. */
+    private static String modifiersMaskToString(int mask) {
+        if (mask <= 0) return null;
+        java.util.List<String> mods = new java.util.ArrayList<>(6);
+        if ((mask & 1) != 0) mods.add("DA");      // Disappearing Arrows
+        if ((mask & 2) != 0) mods.add("GN");      // Ghost Notes
+        if ((mask & 4) != 0) mods.add("NA");      // No Arrows
+        if ((mask & 8) != 0) mods.add("FEET");    // (UraSaber 커스텀)
+        if ((mask & 16) != 0) mods.add("TRICK");  // (UraSaber 커스텀)
+        if ((mask & 32) != 0) mods.add("DASMOL"); // (UraSaber 커스텀)
+        return mods.isEmpty() ? null : String.join(",", mods);
     }
 
     /** 이 (player, chart) 조합의 직전까지의 best score. 없으면 -1. */

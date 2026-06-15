@@ -1,0 +1,266 @@
+package com.udonsaber.bot.urasaber.api;
+
+import java.util.Base64;
+
+/**
+ * "UraSaber Submission Payload v1" 디코더.
+ *
+ * 인월드 {@code BSReplayRecorder.EncodeSubmission()} 가 만든 바이트 레이아웃과 정확히 미러된다.
+ * (월드는 URL-safe base64 로 인코딩 후 {@code submitUrlPrefix} 를 붙여 링크로 표시 → 사용자가
+ *  VRCUrlInputField 에 붙여넣고 Submit → 월드가 VRCStringDownloader 로 GET → 봇 /submit?d= 도착.)
+ *
+ * <h3>바이트 레이아웃 (little-endian)</h3>
+ * <pre>
+ *  magic        : byte 0xB5, byte 0x53
+ *  version      : byte
+ *  name         : byte len, len × int16 (UTF-16 코드유닛)
+ *  mapId        : byte len, len × byte (ASCII hex BeatSaver key)
+ *  diff         : byte (0..4)
+ *  charIdx      : byte (0=Std,1=Lawless,2=OneSaber,3=NoArrows,4=90,5=360,6=Lightshow)
+ *  score        : int32
+ *  accX100      : int16 (정확도 ×100)
+ *  maxCombo     : int16
+ *  good/bad/miss: int16 ×3
+ *  fullCombo    : byte
+ *  modifiers    : int32 (비트마스크)
+ *  jumpDistance : int32 (×1000)
+ *  heightMul    : int32 (×1000)
+ *  originX/Y/Z  : int32 ×3 (×1000)
+ *  storeHead    : byte (제출 페이로드는 항상 0 = 세이버만)
+ *  frameStride  : byte
+ *  frameCount   : int32
+ *  eventCount   : int32
+ *  frames[]     : { int16 timeUnits(20ms), [head: posRel+quat], L: posRel+quat, R: posRel+quat }
+ *  events[]     : { int16 timeUnits(20ms), uint16 packed, byte pre, byte post }  (6B)
+ *                 packed bits: line(0..3) | layer<<2 | color<<4 | cutDir<<5(0..15) | kind<<9
+ * </pre>
+ * posRel = int16×3, 값 = origin + i16/32767 × 16(POS_RANGE). quat = uint32 smallest-three.
+ */
+public final class ReplaySubmissionCodec {
+
+    public static final int MAGIC0 = 0xB5;
+    public static final int MAGIC1 = 0x53;
+
+    private static final float POS_RANGE = 16f;
+    private static final float QUAT_RANGE = 0.70710678f;
+    private static final float FRAME_TIME_UNIT = 0.02f;
+
+    public static final int KIND_GOOD = 0;
+    public static final int KIND_BAD = 1;
+    public static final int KIND_MISS = 2;
+
+    public static final class Frame {
+        public float time;
+        public float hx, hy, hz, hqx, hqy, hqz, hqw;  // head (storeHead=false 면 0)
+        public float lx, ly, lz, lqx, lqy, lqz, lqw;  // left saber
+        public float rx, ry, rz, rqx, rqy, rqz, rqw;  // right saber
+    }
+
+    public static final class Event {
+        public float time;     // 노트 히트 시각(초) = timeUnits × 0.02
+        public int line;       // 0..3
+        public int layer;      // 0..2
+        public int color;      // 0=red(left), 1=blue(right)
+        public int cutDir;     // 0..8 (미스/미상=15)
+        public int kind;       // 0 good / 1 bad / 2 miss
+        public int pre;        // 0..255 (Beat Saber preSwing 점수 0..70)
+        public int post;       // 0..255 (postSwing 점수 0..30)
+        public boolean isGoodOrBad() { return kind == KIND_GOOD || kind == KIND_BAD; }
+    }
+
+    public static final class Submission {
+        public int version;
+        public String playerName = "";
+        public String mapId = "";
+        public int diff, charIdx;
+        public int score, accX100, maxCombo, good, bad, miss;
+        public boolean fullCombo;
+        public int modifiers;
+        public float jumpDistance, playerHeightMul;
+        public float originX, originY, originZ;
+        public boolean storeHead;
+        public int frameStride;
+        public Frame[] frames = new Frame[0];
+        public Event[] events = new Event[0];
+
+        public double accuracy() { return accX100 / 100.0; }
+        public boolean hasFrames() { return frames != null && frames.length > 0; }
+    }
+
+    private final byte[] b;
+    private int p;
+    private float originX, originY, originZ;
+
+    private ReplaySubmissionCodec(byte[] data) { this.b = data; this.p = 0; }
+
+    // ---------------------------------------------------------------
+    // 진입점
+    // ---------------------------------------------------------------
+
+    /** URL-safe base64 → 바이트. 실패 시 null. (월드는 +→-, /→_, = 제거로 인코딩) */
+    public static byte[] decodeUrlSafeBase64(String s) {
+        if (s == null || s.isEmpty()) return null;
+        try {
+            String b64 = s.replace('-', '+').replace('_', '/');
+            int pad = (4 - (b64.length() % 4)) % 4;
+            if (pad > 0) b64 += "=".repeat(pad);
+            return Base64.getDecoder().decode(b64);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 디코드된 바이트가 제출 페이로드(매직 0xB5 0x53)인지. */
+    public static boolean isBinaryPayload(byte[] raw) {
+        return raw != null && raw.length >= 3
+                && (raw[0] & 0xFF) == MAGIC0 && (raw[1] & 0xFF) == MAGIC1;
+    }
+
+    /** 바이트 → Submission. 형식 오류/범위 초과 시 null. */
+    public static Submission decode(byte[] raw) {
+        if (!isBinaryPayload(raw)) return null;
+        try {
+            return new ReplaySubmissionCodec(raw).read();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // 저수준 reader
+    // ---------------------------------------------------------------
+
+    private int rByte() { return b[p++] & 0xFF; }
+
+    private int rI16() {
+        int lo = rByte(), hi = rByte();
+        int u = lo | (hi << 8);
+        if (u >= 32768) u -= 65536;
+        return u;
+    }
+
+    private int rU16() {
+        int lo = rByte(), hi = rByte();
+        return lo | (hi << 8);
+    }
+
+    private int rI32() {
+        int v = (b[p] & 0xFF) | ((b[p + 1] & 0xFF) << 8) | ((b[p + 2] & 0xFF) << 16) | ((b[p + 3] & 0xFF) << 24);
+        p += 4;
+        return v;
+    }
+
+    private float rF() { return rI32() / 1000f; }
+
+    private boolean rBool() { return rByte() != 0; }
+
+    private String rStrAscii() {
+        int len = rByte();
+        StringBuilder sb = new StringBuilder(len);
+        for (int i = 0; i < len; i++) sb.append((char) rByte());
+        return sb.toString();
+    }
+
+    private String rStrUtf16() {
+        int len = rByte();
+        StringBuilder sb = new StringBuilder(len);
+        for (int i = 0; i < len; i++) sb.append((char) rU16());
+        return sb.toString();
+    }
+
+    /** WPosRel 미러: origin + i16/32767 × POS_RANGE. */
+    private void readPosRel(float[] out) {
+        out[0] = originX + rI16() / 32767f * POS_RANGE;
+        out[1] = originY + rI16() / 32767f * POS_RANGE;
+        out[2] = originZ + rI16() / 32767f * POS_RANGE;
+    }
+
+    /** PackQuat(smallest-three) 미러 → [x,y,z,w] (정규화됨). */
+    private void readQuat(float[] out) {
+        long packed = rI32() & 0xFFFFFFFFL;
+        int idx = (int) ((packed >> 30) & 3);
+        int shift = 20;
+        float sumsq = 0f;
+        for (int k = 0; k < 4; k++) {
+            if (k == idx) continue;
+            int u = (int) ((packed >> shift) & 1023);
+            float v = (u / 1023f * 2f - 1f) * QUAT_RANGE;
+            out[k] = v;
+            sumsq += v * v;
+            shift -= 10;
+        }
+        out[idx] = (float) Math.sqrt(Math.max(0f, 1f - sumsq));
+        float n = (float) Math.sqrt(out[0] * out[0] + out[1] * out[1] + out[2] * out[2] + out[3] * out[3]);
+        if (n > 1e-6f) { out[0] /= n; out[1] /= n; out[2] /= n; out[3] /= n; }
+    }
+
+    // ---------------------------------------------------------------
+    // 본문
+    // ---------------------------------------------------------------
+
+    private Submission read() {
+        Submission s = new Submission();
+        rByte(); rByte();              // magic
+        s.version = rByte();
+        s.playerName = rStrUtf16();
+        s.mapId = rStrAscii();
+        s.diff = rByte();
+        s.charIdx = rByte();
+        s.score = rI32();
+        s.accX100 = rU16();
+        s.maxCombo = rU16();
+        s.good = rU16();
+        s.bad = rU16();
+        s.miss = rU16();
+        s.fullCombo = rBool();
+        s.modifiers = rI32();
+        s.jumpDistance = rF();
+        s.playerHeightMul = rF();
+        s.originX = rF(); s.originY = rF(); s.originZ = rF();
+        originX = s.originX; originY = s.originY; originZ = s.originZ;
+        s.storeHead = rByte() != 0;
+        s.frameStride = rByte();
+        int fc = rI32();
+        int ec = rI32();
+
+        if (fc < 0 || fc > 1_000_000) throw new IllegalStateException("bad frameCount " + fc);
+        if (ec < 0 || ec > 1_000_000) throw new IllegalStateException("bad eventCount " + ec);
+
+        float[] pos = new float[3];
+        float[] quat = new float[4];
+
+        Frame[] frames = new Frame[fc];
+        for (int i = 0; i < fc; i++) {
+            Frame f = new Frame();
+            f.time = rI16() * FRAME_TIME_UNIT;
+            if (s.storeHead) {
+                readPosRel(pos);  f.hx = pos[0]; f.hy = pos[1]; f.hz = pos[2];
+                readQuat(quat);   f.hqx = quat[0]; f.hqy = quat[1]; f.hqz = quat[2]; f.hqw = quat[3];
+            }
+            readPosRel(pos); f.lx = pos[0]; f.ly = pos[1]; f.lz = pos[2];
+            readQuat(quat);  f.lqx = quat[0]; f.lqy = quat[1]; f.lqz = quat[2]; f.lqw = quat[3];
+            readPosRel(pos); f.rx = pos[0]; f.ry = pos[1]; f.rz = pos[2];
+            readQuat(quat);  f.rqx = quat[0]; f.rqy = quat[1]; f.rqz = quat[2]; f.rqw = quat[3];
+            frames[i] = f;
+        }
+        s.frames = frames;
+
+        Event[] events = new Event[ec];
+        for (int j = 0; j < ec; j++) {
+            Event e = new Event();
+            e.time = rI16() * FRAME_TIME_UNIT;
+            int packed = rU16();
+            e.line = packed & 0x3;
+            e.layer = (packed >> 2) & 0x3;
+            e.color = (packed >> 4) & 0x1;
+            e.cutDir = (packed >> 5) & 0xF;
+            e.kind = (packed >> 9) & 0x3;
+            e.pre = rByte();
+            e.post = rByte();
+            events[j] = e;
+        }
+        s.events = events;
+
+        return s;
+    }
+}

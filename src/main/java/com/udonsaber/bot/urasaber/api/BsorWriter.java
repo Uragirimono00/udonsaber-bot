@@ -24,10 +24,10 @@ public final class BsorWriter {
 
     /**
      * noteID = scoringType*10000 + line*1000 + layer*100 + color*10 + cutDir.
-     * 일반 색노트의 scoringType. ArcViewer 가 맵에서 계산하는 값과 일치해야 노트 오버레이가 정확히 매칭됨.
-     * (불확실 — ArcViewer 실측 후 이 한 값만 튜닝하면 됨. 미스매치여도 아바타 재생/시간 폴백은 동작.)
+     * 일반 색노트의 scoringType. ArcViewer ScoringEvent.ScoringType.Note = 3 (소스 실측 확정 2026-06-16).
+     * ObjectManager.CalculateObjectPosition 매칭이 noteID 동일해야 컷/미스 오버레이가 정확히 정렬됨.
      */
-    private static final int SCORING_TYPE_NORMAL = 0;
+    private static final int SCORING_TYPE_NORMAL = 3;
 
     private static final String[] DIFF_NAMES = { "Easy", "Normal", "Hard", "Expert", "ExpertPlus" };
     private static final String[] MODE_NAMES = { "Standard", "Lawless", "OneSaber", "NoArrows", "90Degree", "360Degree", "Lightshow" };
@@ -117,14 +117,42 @@ public final class BsorWriter {
             wQuat(f.rqx, f.rqy, f.rqz, f.rqw);
         }
 
-        // ---- block 2: notes (비움) ----
-        // ★ ArcViewer 는 노트 이벤트를 맵 노트와 (1) spawnTime ≈ TimeFromBeat(noteBeat) 1ms 오차 +
-        //    (2) noteID 로 매칭한다(ObjectManager.cs). 우리 이벤트 time 은 "컷(히트) 시각을 20ms 양자화"한
-        //    값이라 노트의 정확한 beat 시각과 안 맞아 전부 미스매치 → "Couldn't match N replay notes" +
-        //    추정 위치로 이상한 컷이 그려졌다. 노트의 예정 시각(초, ms 정밀)을 인월드에서 정확히 캡처해
-        //    보내기 전까지는 노트 블록을 비워 아바타 고스트만(맵 노트는 ArcViewer 가 맵에서 그대로 표시).
+        // ---- block 2: notes (컷/미스 오버레이) ----
+        // ArcViewer(ObjectManager) 는 맵 노트와 (1) spawnTime ≈ TimeFromBeat(noteBeat) 1ms(CheckSameTime) +
+        // (2) noteID(=3*10000+line*1000+layer*100+color*10+cutDir) 로 매칭한다. 인월드가 이제 노트 예정
+        // 시각(spawnTime, 0.1ms 정밀)을 보내므로 그 값으로 매칭 가능 → 컷 마커/점수/미스 X 가 노트 위치에 그려짐.
+        // 일반 색노트만(good/bad/miss). 체인/아크/봄은 미포함(추후).
         wByte(2);
-        wInt(0);
+        ReplaySubmissionCodec.Event[] events = sub.events != null ? sub.events : new ReplaySubmissionCodec.Event[0];
+        wInt(events.length);
+        for (ReplaySubmissionCodec.Event e : events) {
+            int noteID = SCORING_TYPE_NORMAL * 10000 + e.line * 1000 + e.layer * 100 + e.color * 10 + e.cutDir;
+            wInt(noteID);
+            wFloat(e.spawnTime);   // eventTime (인디케이터) = spawnTime
+            wFloat(e.spawnTime);   // spawnTime (매칭 기준)
+            int eventType = e.kind;  // 0 good / 1 bad / 2 miss
+            wInt(eventType);
+            if (eventType == 0 || eventType == 1) {
+                // NoteCutInfo (good/bad 만 — Replay.cs DecodeCutInfo 순서와 일치)
+                float beforeRating = clamp01(e.pre / 70f);   // preSwing 0..70 → 0..1
+                float afterRating = clamp01(e.post / 30f);   // postSwing 0..30 → 0..1
+                wBool(true);    // speedOK
+                wBool(true);    // directionOK
+                wBool(true);    // saberTypeOK
+                wBool(false);   // wasCutTooSoon
+                wFloat(0f);     // saberSpeed
+                wVec(0f, 0f, 0f); // saberDir
+                wInt(e.color);  // saberType (0=left/red, 1=right/blue)
+                wFloat(0f);     // timeDeviation
+                wFloat(0f);     // cutDirDeviation
+                wVec(0f, 0f, 0f); // cutPoint
+                wVec(0f, 0f, 0f); // cutNormal
+                wFloat(0f);     // cutDistanceToCenter (0 = 센터 만점)
+                wFloat(0f);     // cutAngle
+                wFloat(beforeRating); // beforeCutRating
+                wFloat(afterRating);  // afterCutRating
+            }
+        }
 
         // ---- block 3: walls ----
         wByte(3);
@@ -161,6 +189,8 @@ public final class BsorWriter {
     // ---------------------------------------------------------------
     // 저수준 writer (little-endian)
     // ---------------------------------------------------------------
+
+    private static float clamp01(float v) { return v < 0f ? 0f : (v > 1f ? 1f : v); }
 
     private void wByte(int v) { o.write(v & 0xFF); }
 

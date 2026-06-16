@@ -31,8 +31,9 @@ import java.util.Base64;
  *  frameCount   : int32
  *  eventCount   : int32
  *  frames[]     : { int16 timeUnits(20ms), [head: posRel+quat], L: posRel+quat, R: posRel+quat }
- *  events[]     : { int16 timeUnits(20ms), uint16 packed, byte pre, byte post }  (6B)
- *                 packed bits: line(0..3) | layer<<2 | color<<4 | cutDir<<5(0..15) | kind<<9
+ *  events[]     : { int32 spawnTime(초×10000), uint16 packed, byte pre, byte post }  (8B)
+ *                 packed bits: line(0..3) | layer<<2 | color<<4 | cutDir<<5(0..15) | kind<<9(0 good/1 bad/2 miss)
+ *                 spawnTime=노트 예정 시각(초)→ArcViewer 매칭(1ms). noteID=3*10000+line*1000+layer*100+color*10+cutDir
  * </pre>
  * posRel = int16×3, 값 = origin + i16/32767 × 16(POS_RANGE). quat = uint32 smallest-three.
  */
@@ -57,7 +58,8 @@ public final class ReplaySubmissionCodec {
     }
 
     public static final class Event {
-        public float time;     // 노트 히트 시각(초) = timeUnits × 0.02
+        public float time;     // eventTime(초) = spawnTime (인디케이터 애니메이션 기준)
+        public float spawnTime; // 노트 예정 시각(초) — ArcViewer 맵 노트 매칭 기준(CheckSameTime 1ms)
         public int line;       // 0..3
         public int layer;      // 0..2
         public int color;      // 0=red(left), 1=blue(right)
@@ -257,10 +259,13 @@ public final class ReplaySubmissionCodec {
     }
 
     private void readEventsInto(Submission s) {
+        // v3 이벤트(8B): spawnTime(int32, 초×10000) + packed(uint16) + pre + post.
+        // packed = line | layer<<2 | color<<4 | cutDir<<5 | kind<<9.
         Event[] events = new Event[s.eventCount];
         for (int j = 0; j < s.eventCount; j++) {
             Event e = new Event();
-            e.time = rI16() * FRAME_TIME_UNIT;
+            e.spawnTime = rI32() / 10000f;   // 예정 시각(초) — 매칭 기준
+            e.time = e.spawnTime;            // eventTime = spawnTime
             int packed = rU16();
             e.line = packed & 0x3;
             e.layer = (packed >> 2) & 0x3;
@@ -297,12 +302,14 @@ public final class ReplaySubmissionCodec {
         }
     }
 
-    /** 합쳐진 프레임 스트림 → header.frames 채움(header 의 frameCount/origin/storeHead 사용). 성공 true. */
+    /** 합쳐진 프레임 스트림 → header.frames(+이벤트) 채움. 스트림 = [프레임 전부][이벤트 전부] 순서.
+     *  header 의 frameCount/eventCount/origin/storeHead 사용. 성공 true. */
     public static boolean decodeFramesInto(Submission header, byte[] frameStream) {
         try {
             ReplaySubmissionCodec c = new ReplaySubmissionCodec(frameStream);
             c.originX = header.originX; c.originY = header.originY; c.originZ = header.originZ;
             c.readFramesInto(header);
+            c.readEventsInto(header);   // 프레임 뒤에 이어붙은 노트 컷/미스 이벤트(ArcViewer 오버레이)
             return true;
         } catch (Exception e) {
             return false;

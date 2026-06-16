@@ -743,6 +743,23 @@ public class UraSaberDatabase implements AutoCloseable {
         }
     }
 
+    /** 제출된 스코어(ura_play) 총 개수 — 삭제 전 미리보기용. */
+    public int countAllPlays() throws SQLException {
+        try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM ura_play")) {
+            return rs.next() ? rs.getInt(1) : 0;
+        }
+    }
+
+    /**
+     * 제출된 모든 스코어(ura_play) 삭제 — 리더보드 전체 초기화. 삭제된 행 수 반환.
+     * 곡(ura_song) / 차트(ura_chart) / 플레이어(ura_player) 메타데이터는 보존.
+     */
+    public int deleteAllPlays() throws SQLException {
+        try (Statement st = conn.createStatement()) {
+            return st.executeUpdate("DELETE FROM ura_play");
+        }
+    }
+
     @Override
     public void close() throws SQLException {
         if (conn != null && !conn.isClosed()) conn.close();

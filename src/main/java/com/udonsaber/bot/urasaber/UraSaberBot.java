@@ -5,6 +5,7 @@ import com.udonsaber.bot.urasaber.api.BplistFetcher;
 import com.udonsaber.bot.urasaber.db.UraSaberDatabase;
 import com.udonsaber.bot.urasaber.discord.PlaylistCommand;
 import com.udonsaber.bot.urasaber.discord.SongRequestCommand;
+import com.udonsaber.bot.urasaber.discord.UraSaberAdminCommand;
 import com.udonsaber.bot.urasaber.discord.UraSaberChannelCommand;
 import net.dv8tion.jda.api.JDA;
 import net.dv8tion.jda.api.JDABuilder;
@@ -55,7 +56,8 @@ public class UraSaberBot {
                 .addEventListeners(
                         new UraSaberChannelCommand(uraDb),
                         new PlaylistCommand(uraDb, bplistFetcher),
-                        new SongRequestCommand(new BeatSaverMapLookup(), uraDb, bplistFetcher)
+                        new SongRequestCommand(new BeatSaverMapLookup(), uraDb, bplistFetcher),
+                        new UraSaberAdminCommand(uraDb)
                 );
         jda = builder.build();
         jda.awaitReady();
@@ -98,6 +100,13 @@ public class UraSaberBot {
                 Commands.slash("song-request", "Request a song — shows BeatSaver map info with a download button")
                         .addOption(OptionType.STRING, "map",
                                 "BeatSaver link or BSR key (e.g. 4ede8 / !bsr 4ede8)", true)
+                        .setGuildOnly(true),
+                Commands.slash("urasaber-admin", "UraSaber admin tools")
+                        .addSubcommands(
+                                new SubcommandData("reset-scores",
+                                        "Delete ALL submitted scores (wipes every leaderboard — irreversible)")
+                        )
+                        .setDefaultPermissions(DefaultMemberPermissions.enabledFor(Permission.ADMINISTRATOR))
                         .setGuildOnly(true)
         ));
 

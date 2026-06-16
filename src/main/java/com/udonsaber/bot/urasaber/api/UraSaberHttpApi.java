@@ -1733,6 +1733,11 @@ public class UraSaberHttpApi {
      *  - 아바타 고스트 .bsor 생성 → data/replays/ 저장 (ArcViewer 재생용). 노트 오버레이는 후속.
      */
     private void handleBinarySubmission(HttpExchange ex, String ip, byte[] raw) throws Exception {
+        // version 3 = 청크 전송(멀티페이스트). v2(단일샷)는 아래 기존 경로.
+        if (raw != null && raw.length >= 3 && (raw[2] & 0xFF) == 3) {
+            handleChunkedSubmission(ex, ip, raw);
+            return;
+        }
         ReplaySubmissionCodec.Submission sub = ReplaySubmissionCodec.decode(raw);
         if (sub == null) {
             respond(ex, 400, "application/json; charset=utf-8", "{\"ok\":false,\"error\":\"bad_payload\"}");
@@ -1866,6 +1871,155 @@ public class UraSaberHttpApi {
         if (replayFile != null) b.append(",\"replay\":").append(jsonString(replayFile));
         b.append("}");
         respond(ex, 200, "application/json; charset=utf-8", b.toString());
+    }
+
+    // ========================================
+    // 청크 전송(v3, 멀티페이스트)
+    //   봉투: [0,1]=magic 0xB5 0x53 | [2]=ver(3) | [3-4]=chunkIndex(u16 LE) | [5-6]=chunkCount(u16 LE)
+    //        | [7-14]=playId(8B, 한 플레이당 고정) | [15..]=body
+    //   chunk0 body = [스코어 헤더(name..eventCount)] + [프레임 스트림 조각0],  chunk i body = 프레임 스트림 조각 i
+    //   1회차(idx 0): 스코어 즉시 등록 + 세션 생성/교체(=같은 IP 기존 미완 세션 폐기). 끝까지 보내면 .bsor 완성.
+    // ========================================
+    private static final long REPLAY_SESSION_TTL_MS = 10L * 60_000L;
+    private static final long REGISTERED_PLAY_TTL_MS = 60L * 60_000L;
+
+    private static final class ReplaySession {
+        volatile long timestamp;
+        final String playIdHex;
+        final int chunkCount;
+        int nextIndex = 1;                 // 다음에 받을 청크 인덱스(1..count-1)
+        final ByteArrayOutputStream frameBuf = new ByteArrayOutputStream(64 * 1024);
+        ReplaySubmissionCodec.Submission header;
+        String replayFile, hash, songName, mapper, modifiersStr, mapId;
+        ReplaySession(long ts, String pid, int count) { timestamp = ts; playIdHex = pid; chunkCount = count; }
+    }
+    private final Map<String, ReplaySession> replaySessions = new ConcurrentHashMap<>();  // ip → 진행중 리플레이 세션
+    private final Map<String, Long> registeredPlays = new ConcurrentHashMap<>();           // playId → epoch(스코어 중복 등록 방지)
+
+    private void handleChunkedSubmission(HttpExchange ex, String ip, byte[] raw) throws Exception {
+        if (raw.length < 15) { respond(ex, 400, "application/json; charset=utf-8", "{\"ok\":false,\"error\":\"short_chunk\"}"); return; }
+        int idx = (raw[3] & 0xFF) | ((raw[4] & 0xFF) << 8);
+        int count = (raw[5] & 0xFF) | ((raw[6] & 0xFF) << 8);
+        StringBuilder pidSb = new StringBuilder(16);
+        for (int i = 0; i < 8; i++) pidSb.append(String.format("%02x", raw[7 + i]));
+        String playId = pidSb.toString();
+        byte[] body = Arrays.copyOfRange(raw, 15, raw.length);
+        if (count < 1 || idx < 0 || idx >= count) { respond(ex, 400, "application/json; charset=utf-8", "{\"ok\":false,\"error\":\"bad_chunk_index\"}"); return; }
+
+        long nowMs = System.currentTimeMillis();
+        cleanupReplaySessions(nowMs);
+
+        if (idx == 0) {
+            ReplaySubmissionCodec.HeaderResult hr = ReplaySubmissionCodec.parseChunk0Header(body);
+            if (hr == null) { respond(ex, 400, "application/json; charset=utf-8", "{\"ok\":false,\"error\":\"bad_header\"}"); return; }
+            ReplaySubmissionCodec.Submission header = hr.header;
+
+            String mapId = nullIfBlank(header.mapId);
+            if (mapId == null || !BeatSaverImporter.isValidBsr(mapId)) { respond(ex, 422, "application/json; charset=utf-8", "{\"ok\":false,\"error\":\"bad_map\"}"); return; }
+            double accuracy = header.accuracy();
+            if (header.score < 0 || accuracy < 0 || accuracy > 100 || header.diff < 0 || header.diff > 9) {
+                respond(ex, 422, "application/json; charset=utf-8", "{\"ok\":false,\"error\":\"bad_score\"}"); return;
+            }
+            int diff = header.diff, score = header.score;
+            String character = (header.charIdx >= 0 && header.charIdx < CHARACTERISTICS.length) ? CHARACTERISTICS[header.charIdx] : "Standard";
+            String nick = nullIfBlank(header.playerName);
+            if (nick == null) nick = "Anon-" + ip.replace('.', '_').replace(':', '_');
+            if (nick.length() > 64) nick = nick.substring(0, 64);
+            String safeNick = nick.replaceAll("[^a-zA-Z0-9._-]", "_");
+            if (safeNick.length() > 24) safeNick = safeNick.substring(0, 24);
+            String replayFile = safeNick + "_" + mapId + "_d" + diff + "_" + playId + ".bsor";
+
+            long nowSec = Instant.now().getEpochSecond();
+            String hash = "", songName = null, mapper = null, songAuthor = null; Integer noteCount = null;
+            try {
+                BeatSaverImporter.Result r = importer.importMap(mapId);
+                if (r != null && r.ok && r.meta != null) {
+                    songName = r.meta.songName; songAuthor = r.meta.songAuthor; mapper = r.meta.mapper; hash = r.meta.hash;
+                    try { db.upsertSong(mapId, songName, null, songAuthor, mapper, r.meta.bpm > 0 ? r.meta.bpm : null, r.meta.duration > 0 ? r.meta.duration : null, nowSec); } catch (Exception ignore) {}
+                }
+                noteCount = importer.getDiffNoteCount(mapId, diff <= 4 ? diff : 4);
+                Float njs = importer.getDiffNjs(mapId, diff <= 4 ? diff : 4);
+                if (njs != null && njs > 0f) header.jumpDistance = njs;
+            } catch (Exception e) { log.warn("[submit-chunk] meta lookup failed {}: {}", mapId, e.toString()); }
+
+            String modifiersStr = modifiersMaskToString(header.modifiers);
+            String arcViewerUrl = buildArcViewerUrl(ex, mapId, replayFile);  // playId 결정적 — 리플레이 완성 시 동작
+
+            // 스코어 즉시 등록 (playId 중복 방지)
+            Long reg = registeredPlays.get(playId);
+            boolean already = reg != null && (nowMs - reg) < REGISTERED_PLAY_TTL_MS;
+            if (!already) {
+                long playerId = db.upsertPlayer(nick, nowSec);
+                int hit = header.good + header.bad, total = header.good + header.bad + header.miss;
+                Integer maxCombo = header.maxCombo > 0 ? header.maxCombo : null;
+                String rank = rankFromAcc(accuracy);
+                String country = null;
+                try { country = db.getPlayerCountry(playerId); if (country == null || country.isBlank()) { country = geo.lookup(ip); if (country != null) db.updatePlayerCountry(playerId, country); } } catch (Exception ignore) {}
+                int prevBest = previousBestScore(playerId, mapId, character, diff);
+                boolean personalBest = (prevBest < 0) || (score > prevBest);
+                db.insertPlay(playerId, mapId, character, diff, score, accuracy, null, maxCombo, hit, total, rank, header.fullCombo, modifiersStr, nowSec, nowSec, ip, header.good, header.bad, header.miss, noteCount, country);
+                registeredPlays.put(playId, nowMs);
+                if (notifier != null) {
+                    pushNotification(nick, mapId, songName, songAuthor, character, diff, score, accuracy, null, maxCombo, header.good, header.bad, header.miss, noteCount, header.fullCombo, rank, personalBest, country, nowSec, arcViewerUrl);
+                }
+                log.info("[submit-chunk] score registered ip={} nick='{}' map={} diff={} score={} playId={} chunks={}", ip, nick, mapId, diff, score, playId, count);
+            } else {
+                log.info("[submit-chunk] score already registered playId={} (continuing replay)", playId);
+            }
+
+            // 세션 생성/교체(=기존 미완 세션 폐기) + chunk0 프레임 조각 적재
+            ReplaySession s = new ReplaySession(nowMs, playId, count);
+            s.header = header; s.replayFile = replayFile; s.hash = hash; s.songName = songName; s.mapper = mapper; s.modifiersStr = modifiersStr; s.mapId = mapId;
+            if (hr.frameStreamOffset < body.length) s.frameBuf.write(body, hr.frameStreamOffset, body.length - hr.frameStreamOffset);
+            replaySessions.put(ip, s);
+
+            if (count == 1) { finalizeReplay(ex, ip, s); return; }  // 프레임이 chunk0 하나로 끝
+            respond(ex, 200, "application/json; charset=utf-8",
+                    "{\"ok\":true,\"scoreRegistered\":true,\"replayChunk\":0,\"replayTotal\":" + (count - 1)
+                    + ",\"replay\":" + jsonString(replayFile)
+                    + (arcViewerUrl != null ? ",\"arcViewer\":" + jsonString(arcViewerUrl) : "") + "}");
+            return;
+        }
+
+        // idx >= 1 : 프레임 조각 누적
+        ReplaySession s = replaySessions.get(ip);
+        if (s == null || !s.playIdHex.equals(playId)) {
+            respond(ex, 200, "application/json; charset=utf-8", "{\"ok\":false,\"error\":\"stale_session\"}"); return;
+        }
+        if (idx != s.nextIndex) {
+            respond(ex, 200, "application/json; charset=utf-8", "{\"ok\":false,\"error\":\"out_of_order\",\"expected\":" + s.nextIndex + "}"); return;
+        }
+        s.frameBuf.write(body, 0, body.length);
+        s.nextIndex++;
+        s.timestamp = nowMs;
+        if (idx == count - 1) { finalizeReplay(ex, ip, s); return; }
+        respond(ex, 200, "application/json; charset=utf-8", "{\"ok\":true,\"replayChunk\":" + idx + ",\"replayTotal\":" + (count - 1) + "}");
+    }
+
+    /** 모든 프레임 청크 수신 완료 → 조립 + .bsor 저장 + 응답. 세션 제거. */
+    private void finalizeReplay(HttpExchange ex, String ip, ReplaySession s) throws IOException {
+        replaySessions.remove(ip);
+        byte[] frameStream = s.frameBuf.toByteArray();
+        if (!ReplaySubmissionCodec.decodeFramesInto(s.header, frameStream)) {
+            respond(ex, 200, "application/json; charset=utf-8", "{\"ok\":false,\"error\":\"bad_frames\"}"); return;
+        }
+        try {
+            saveBsorAs(s.header, s.hash, s.mapId, s.songName, s.mapper, s.modifiersStr, Instant.now().getEpochSecond(), s.replayFile);
+        } catch (Exception e) {
+            log.warn("[submit-chunk] bsor save failed: {}", e.toString());
+            respond(ex, 200, "application/json; charset=utf-8", "{\"ok\":false,\"error\":\"bsor_save\"}"); return;
+        }
+        String arc = buildArcViewerUrl(ex, s.mapId, s.replayFile);
+        log.info("[submit-chunk] replay complete ip={} playId={} frames={} file={}", ip, s.playIdHex,
+                s.header.frames != null ? s.header.frames.length : 0, s.replayFile);
+        respond(ex, 200, "application/json; charset=utf-8",
+                "{\"ok\":true,\"replayComplete\":true,\"replay\":" + jsonString(s.replayFile)
+                + (arc != null ? ",\"arcViewer\":" + jsonString(arc) : "") + "}");
+    }
+
+    private void cleanupReplaySessions(long nowMs) {
+        replaySessions.entrySet().removeIf(e -> nowMs - e.getValue().timestamp > REPLAY_SESSION_TTL_MS);
+        registeredPlays.entrySet().removeIf(e -> nowMs - e.getValue() > REGISTERED_PLAY_TTL_MS);
     }
 
     /** 제출 페이로드 → 지정 파일명으로 .bsor 저장(data/replays/). 호출 측이 안정적(해시) 파일명을 정함. */

@@ -80,6 +80,8 @@ public final class ReplaySubmissionCodec {
         public float originX, originY, originZ;
         public boolean storeHead;
         public int frameStride;
+        public int frameCount;   // 헤더가 선언한 프레임 수 (청크 조립 시 frames 채우기 전)
+        public int eventCount;   // 헤더가 선언한 이벤트 수
         public Frame[] frames = new Frame[0];
         public Event[] events = new Event[0];
 
@@ -202,6 +204,14 @@ public final class ReplaySubmissionCodec {
         Submission s = new Submission();
         rByte(); rByte();              // magic
         s.version = rByte();
+        readHeaderFields(s);           // name..eventCount (origin 세팅 포함)
+        readFramesInto(s);
+        readEventsInto(s);
+        return s;
+    }
+
+    /** 스코어 헤더(name..eventCount) 읽기. magic/version 은 호출 측이 이미 소비한 상태에서 호출. */
+    private void readHeaderFields(Submission s) {
         s.playerName = rStrUtf16();
         s.mapId = rStrAscii();
         s.diff = rByte();
@@ -220,17 +230,17 @@ public final class ReplaySubmissionCodec {
         originX = s.originX; originY = s.originY; originZ = s.originZ;
         s.storeHead = rByte() != 0;
         s.frameStride = rByte();
-        int fc = rI32();
-        int ec = rI32();
+        s.frameCount = rI32();
+        s.eventCount = rI32();
+        if (s.frameCount < 0 || s.frameCount > 5_000_000) throw new IllegalStateException("bad frameCount " + s.frameCount);
+        if (s.eventCount < 0 || s.eventCount > 1_000_000) throw new IllegalStateException("bad eventCount " + s.eventCount);
+    }
 
-        if (fc < 0 || fc > 1_000_000) throw new IllegalStateException("bad frameCount " + fc);
-        if (ec < 0 || ec > 1_000_000) throw new IllegalStateException("bad eventCount " + ec);
-
+    private void readFramesInto(Submission s) {
         float[] pos = new float[3];
         float[] quat = new float[4];
-
-        Frame[] frames = new Frame[fc];
-        for (int i = 0; i < fc; i++) {
+        Frame[] frames = new Frame[s.frameCount];
+        for (int i = 0; i < s.frameCount; i++) {
             Frame f = new Frame();
             f.time = rI16() * FRAME_TIME_UNIT;
             if (s.storeHead) {
@@ -244,9 +254,11 @@ public final class ReplaySubmissionCodec {
             frames[i] = f;
         }
         s.frames = frames;
+    }
 
-        Event[] events = new Event[ec];
-        for (int j = 0; j < ec; j++) {
+    private void readEventsInto(Submission s) {
+        Event[] events = new Event[s.eventCount];
+        for (int j = 0; j < s.eventCount; j++) {
             Event e = new Event();
             e.time = rI16() * FRAME_TIME_UNIT;
             int packed = rU16();
@@ -260,7 +272,40 @@ public final class ReplaySubmissionCodec {
             events[j] = e;
         }
         s.events = events;
+    }
 
-        return s;
+    // ---------------------------------------------------------------
+    // 청크(v3) 지원: 헤더(chunk0 body)와 프레임 스트림(여러 청크 합본) 분리 디코드
+    // ---------------------------------------------------------------
+
+    /** chunk0 body(매직/봉투 제거된, name 부터 시작) → 헤더 파싱 결과. */
+    public static final class HeaderResult {
+        public final Submission header;
+        public final int frameStreamOffset;   // chunk0 body 에서 프레임 스트림이 시작하는 오프셋
+        HeaderResult(Submission h, int off) { this.header = h; this.frameStreamOffset = off; }
+    }
+
+    /** chunk0 body 의 헤더만 파싱(스코어 즉시 등록용). 프레임 시작 오프셋도 반환. 실패 시 null. */
+    public static HeaderResult parseChunk0Header(byte[] body) {
+        try {
+            ReplaySubmissionCodec c = new ReplaySubmissionCodec(body);
+            Submission s = new Submission();
+            c.readHeaderFields(s);
+            return new HeaderResult(s, c.p);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 합쳐진 프레임 스트림 → header.frames 채움(header 의 frameCount/origin/storeHead 사용). 성공 true. */
+    public static boolean decodeFramesInto(Submission header, byte[] frameStream) {
+        try {
+            ReplaySubmissionCodec c = new ReplaySubmissionCodec(frameStream);
+            c.originX = header.originX; c.originY = header.originY; c.originZ = header.originZ;
+            c.readFramesInto(header);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
     }
 }

@@ -26,11 +26,15 @@ import java.util.Base64;
  *  jumpDistance : int32 (×1000)
  *  heightMul    : int32 (×1000)
  *  originX/Y/Z  : int32 ×3 (×1000)
- *  storeHead    : byte (제출 페이로드는 항상 0 = 세이버만)
+ *  storeHead    : byte (청크 경로는 1=머리 포함)
  *  frameStride  : byte
+ *  compressed   : byte (1=v5 DPCM, 0=절대 int16)
  *  frameCount   : int32
  *  eventCount   : int32
- *  frames[]     : { int16 timeUnits(20ms), [head: posRel+quat], L: posRel+quat, R: posRel+quat }
+ *  frames[]     : compressed=0 → 매 프레임 { int16 timeUnits, [head]posRel+quat, L posRel+quat, R posRel+quat }
+ *                 compressed=1(v5 DPCM) → i%30==0 키프레임(위와 동일 절대), 그 외 델타프레임
+ *                   { int8 시간델타, [head]posDelta(int8×3)+quat, L posDelta+quat, R posDelta+quat }
+ *                   posDelta: prev += d/127×1.2(POS_DELTA_RANGE). quat 은 항상 uint32(델타 안 함).
  *  events[]     : { int32 spawnTime(초×10000), uint16 packed, byte pre, byte post }  (8B)
  *                 packed bits: line(0..3) | layer<<2 | color<<4 | cutDir<<5(0..15) | kind<<9(0 good/1 bad/2 miss) | scoringType<<11(3..10)
  *                 spawnTime=노트 예정 시각(초)→ArcViewer 매칭(1ms). noteID=scoringType*10000+line*1000+layer*100+color*10+cutDir
@@ -46,6 +50,8 @@ public final class ReplaySubmissionCodec {
     private static final float POS_RANGE = 16f;
     private static final float QUAT_RANGE = 0.70710678f;
     private static final float FRAME_TIME_UNIT = 0.02f;
+    private static final int SABER_KEYFRAME = 30;       // v5 DPCM 절대 키프레임 간격 (인월드와 일치)
+    private static final float POS_DELTA_RANGE = 1.2f;  // int8 위치 델타 최대 (±1.2m/프레임, 인월드와 일치)
 
     public static final int KIND_GOOD = 0;
     public static final int KIND_BAD = 1;
@@ -84,6 +90,7 @@ public final class ReplaySubmissionCodec {
         public float originX, originY, originZ;
         public boolean storeHead;
         public int frameStride;
+        public boolean compressed;   // true=v5 DPCM(키프레임+int8 델타), false=절대 int16(v2 단일샷)
         public int frameCount;   // 헤더가 선언한 프레임 수 (청크 조립 시 frames 채우기 전)
         public int eventCount;   // 헤더가 선언한 이벤트 수
         public Frame[] frames = new Frame[0];
@@ -181,6 +188,14 @@ public final class ReplaySubmissionCodec {
         out[2] = originZ + rI16() / 32767f * POS_RANGE;
     }
 
+    /** WPosDelta 미러: prev 에 int8 델타(d/127×POS_DELTA_RANGE) 누적(제자리 갱신). */
+    private void readPosDelta(float[] prev) {
+        for (int k = 0; k < 3; k++) {
+            int d = rByte(); if (d >= 128) d -= 256;
+            prev[k] += d / 127f * POS_DELTA_RANGE;
+        }
+    }
+
     /** PackQuat(smallest-three) 미러 → [x,y,z,w] (정규화됨). */
     private void readQuat(float[] out) {
         long packed = rI32() & 0xFFFFFFFFL;
@@ -234,6 +249,7 @@ public final class ReplaySubmissionCodec {
         originX = s.originX; originY = s.originY; originZ = s.originZ;
         s.storeHead = rByte() != 0;
         s.frameStride = rByte();
+        s.compressed = rByte() != 0;   // v5 DPCM 여부
         s.frameCount = rI32();
         s.eventCount = rI32();
         if (s.frameCount < 0 || s.frameCount > 5_000_000) throw new IllegalStateException("bad frameCount " + s.frameCount);
@@ -243,18 +259,33 @@ public final class ReplaySubmissionCodec {
     private void readFramesInto(Submission s) {
         float[] pos = new float[3];
         float[] quat = new float[4];
+        float[] prevH = new float[3], prevL = new float[3], prevR = new float[3];
+        int decUnits = 0;
         Frame[] frames = new Frame[s.frameCount];
         for (int i = 0; i < s.frameCount; i++) {
             Frame f = new Frame();
-            f.time = rI16() * FRAME_TIME_UNIT;
+            // 절대 프레임 여부: 비압축은 매 프레임 절대, 압축(v5)은 SABER_KEYFRAME 마다 절대·그 외 int8 델타.
+            boolean absolute = !s.compressed || (i % SABER_KEYFRAME == 0);
+
+            if (absolute) { decUnits = rI16(); f.time = decUnits * FRAME_TIME_UNIT; }
+            else { int du = rByte(); if (du >= 128) du -= 256; decUnits += du; f.time = decUnits * FRAME_TIME_UNIT; }
+
             if (s.storeHead) {
-                readPosRel(pos);  f.hx = pos[0]; f.hy = pos[1]; f.hz = pos[2];
-                readQuat(quat);   f.hqx = quat[0]; f.hqy = quat[1]; f.hqz = quat[2]; f.hqw = quat[3];
+                if (absolute) { readPosRel(pos); prevH[0]=pos[0]; prevH[1]=pos[1]; prevH[2]=pos[2]; }
+                else { readPosDelta(prevH); pos[0]=prevH[0]; pos[1]=prevH[1]; pos[2]=prevH[2]; }
+                f.hx = pos[0]; f.hy = pos[1]; f.hz = pos[2];
+                readQuat(quat); f.hqx = quat[0]; f.hqy = quat[1]; f.hqz = quat[2]; f.hqw = quat[3];
             }
-            readPosRel(pos); f.lx = pos[0]; f.ly = pos[1]; f.lz = pos[2];
-            readQuat(quat);  f.lqx = quat[0]; f.lqy = quat[1]; f.lqz = quat[2]; f.lqw = quat[3];
-            readPosRel(pos); f.rx = pos[0]; f.ry = pos[1]; f.rz = pos[2];
-            readQuat(quat);  f.rqx = quat[0]; f.rqy = quat[1]; f.rqz = quat[2]; f.rqw = quat[3];
+            if (absolute) { readPosRel(pos); prevL[0]=pos[0]; prevL[1]=pos[1]; prevL[2]=pos[2]; }
+            else { readPosDelta(prevL); pos[0]=prevL[0]; pos[1]=prevL[1]; pos[2]=prevL[2]; }
+            f.lx = pos[0]; f.ly = pos[1]; f.lz = pos[2];
+            readQuat(quat); f.lqx = quat[0]; f.lqy = quat[1]; f.lqz = quat[2]; f.lqw = quat[3];
+
+            if (absolute) { readPosRel(pos); prevR[0]=pos[0]; prevR[1]=pos[1]; prevR[2]=pos[2]; }
+            else { readPosDelta(prevR); pos[0]=prevR[0]; pos[1]=prevR[1]; pos[2]=prevR[2]; }
+            f.rx = pos[0]; f.ry = pos[1]; f.rz = pos[2];
+            readQuat(quat); f.rqx = quat[0]; f.rqy = quat[1]; f.rqz = quat[2]; f.rqw = quat[3];
+
             frames[i] = f;
         }
         s.frames = frames;

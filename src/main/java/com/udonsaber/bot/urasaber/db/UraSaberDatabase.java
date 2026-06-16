@@ -116,6 +116,7 @@ public class UraSaberDatabase implements AutoCloseable {
             migrateAddColumnIfMissing(st, "ura_play", "miss",     "INTEGER");
             migrateAddColumnIfMissing(st, "ura_play", "note_count", "INTEGER");
             migrateAddColumnIfMissing(st, "ura_play", "country",  "TEXT");
+            migrateAddColumnIfMissing(st, "ura_play", "env",      "TEXT");   // 플레이 환경 문자열(njs|rt|...) — 리더보드 표시
             migrateAddColumnIfMissing(st, "ura_player", "country", "TEXT");
             migrateAddColumnIfMissing(st, "ura_song", "cover_url", "TEXT");
             st.executeUpdate("CREATE INDEX IF NOT EXISTS idx_ura_play_chart ON ura_play(map_id, characteristic, difficulty, score DESC)");
@@ -573,18 +574,30 @@ public class UraSaberDatabase implements AutoCloseable {
         }
     }
 
+    // 기존 시그니처 보존(env 없는 호출처용) — env=null 로 위임.
     public long insertPlay(long playerId, String mapId, String characteristic, int difficulty,
                            int score, Double accuracy, Integer combo, Integer maxCombo,
                            Integer hit, Integer total, String rankLetter, boolean fullCombo,
                            String modifiers, long playedAt, long submittedAt, String sourceIp,
                            Integer goodCut, Integer badCut, Integer miss, Integer noteCount,
                            String country) throws SQLException {
+        return insertPlay(playerId, mapId, characteristic, difficulty, score, accuracy, combo, maxCombo,
+                hit, total, rankLetter, fullCombo, modifiers, playedAt, submittedAt, sourceIp,
+                goodCut, badCut, miss, noteCount, country, null);
+    }
+
+    public long insertPlay(long playerId, String mapId, String characteristic, int difficulty,
+                           int score, Double accuracy, Integer combo, Integer maxCombo,
+                           Integer hit, Integer total, String rankLetter, boolean fullCombo,
+                           String modifiers, long playedAt, long submittedAt, String sourceIp,
+                           Integer goodCut, Integer badCut, Integer miss, Integer noteCount,
+                           String country, String env) throws SQLException {
         try (PreparedStatement ps = conn.prepareStatement("""
                 INSERT INTO ura_play
                     (player_id, map_id, characteristic, difficulty, score, accuracy, combo, max_combo,
                      hit, total, rank_letter, full_combo, modifiers, played_at, submitted_at, source_ip,
-                     good_cut, bad_cut, miss, note_count, country)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     good_cut, bad_cut, miss, note_count, country, env)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, Statement.RETURN_GENERATED_KEYS)) {
             ps.setLong(1, playerId);
             ps.setString(2, mapId);
@@ -607,6 +620,7 @@ public class UraSaberDatabase implements AutoCloseable {
             if (miss == null)    ps.setNull(19, java.sql.Types.INTEGER); else ps.setInt(19, miss);
             if (noteCount == null) ps.setNull(20, java.sql.Types.INTEGER); else ps.setInt(20, noteCount);
             if (country == null) ps.setNull(21, java.sql.Types.VARCHAR); else ps.setString(21, country);
+            if (env == null) ps.setNull(22, java.sql.Types.VARCHAR); else ps.setString(22, env);
             ps.executeUpdate();
             try (ResultSet keys = ps.getGeneratedKeys()) {
                 if (keys.next()) return keys.getLong(1);
@@ -648,6 +662,7 @@ public class UraSaberDatabase implements AutoCloseable {
                        (SELECT rank_letter FROM ura_play WHERE player_id = p.id AND map_id = ? AND characteristic = ? AND difficulty = ? ORDER BY score DESC, submitted_at DESC LIMIT 1) AS best_rank,
                        (SELECT full_combo  FROM ura_play WHERE player_id = p.id AND map_id = ? AND characteristic = ? AND difficulty = ? ORDER BY score DESC, submitted_at DESC LIMIT 1) AS best_fc,
                        (SELECT played_at   FROM ura_play WHERE player_id = p.id AND map_id = ? AND characteristic = ? AND difficulty = ? ORDER BY score DESC, submitted_at DESC LIMIT 1) AS best_played_at,
+                       (SELECT env         FROM ura_play WHERE player_id = p.id AND map_id = ? AND characteristic = ? AND difficulty = ? ORDER BY score DESC, submitted_at DESC LIMIT 1) AS best_env,
                        COUNT(*) AS play_count
                 FROM ura_play pl
                 JOIN ura_player p ON p.id = pl.player_id
@@ -657,7 +672,7 @@ public class UraSaberDatabase implements AutoCloseable {
                 LIMIT ?
                 """)) {
             int i = 1;
-            for (int k = 0; k < 4; k++) {
+            for (int k = 0; k < 5; k++) {
                 ps.setString(i++, mapId);
                 ps.setString(i++, characteristic);
                 ps.setInt(i++, difficulty);
@@ -678,7 +693,8 @@ public class UraSaberDatabase implements AutoCloseable {
                             rs.getString(4),
                             rs.getInt(5) != 0,
                             rs.getLong(6),
-                            rs.getInt(7)));
+                            rs.getInt(8),       // play_count (env 서브쿼리 추가로 컬럼 7→8)
+                            rs.getString(7)));  // best_env
                 }
             }
         }
@@ -1010,7 +1026,7 @@ public class UraSaberDatabase implements AutoCloseable {
                            Integer noteCount) {}
 
     public record LeaderboardEntry(int rank, String nickname, int score, Double accuracy,
-                                   String rankLetter, boolean fullCombo, long playedAt, int playCount) {}
+                                   String rankLetter, boolean fullCombo, long playedAt, int playCount, String env) {}
 
     public record PlayerPlay(String mapId, String songName, String songAuthor,
                              String characteristic, int difficulty,

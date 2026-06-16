@@ -31,6 +31,7 @@ import java.util.Base64;
  *  compressed   : byte (1=v5 DPCM, 0=절대 int16)
  *  frameCount   : int32
  *  eventCount   : int32
+ *  env          : byte len + len × byte (ASCII) — 플레이 환경 "njs|rt|jd|jdOn|approachOn|noteSize|gridW|gridH|hitOffset|playerH|saberLen|saberThick|modCode"
  *  frames[]     : compressed=0 → 매 프레임 { int16 timeUnits, [head]posRel+quat, L posRel+quat, R posRel+quat }
  *                 compressed=1(v5 DPCM) → i%30==0 키프레임(위와 동일 절대), 그 외 델타프레임
  *                   { int8 시간델타, [head]posDelta(int8×3)+quat, L posDelta+quat, R posDelta+quat }
@@ -91,6 +92,7 @@ public final class ReplaySubmissionCodec {
         public boolean storeHead;
         public int frameStride;
         public boolean compressed;   // true=v5 DPCM(키프레임+int8 델타), false=절대 int16(v2 단일샷)
+        public String env = "";      // 플레이 환경 문자열 (njs|rt|jd|jdOn|approachOn|noteSize|...|modCode) — 리더보드 표시용
         public int frameCount;   // 헤더가 선언한 프레임 수 (청크 조립 시 frames 채우기 전)
         public int eventCount;   // 헤더가 선언한 이벤트 수
         public Frame[] frames = new Frame[0];
@@ -252,6 +254,7 @@ public final class ReplaySubmissionCodec {
         s.compressed = rByte() != 0;   // v5 DPCM 여부
         s.frameCount = rI32();
         s.eventCount = rI32();
+        s.env = rStrAscii();   // 플레이 환경 문자열 (njs|rt|jd|... 13필드) — 리더보드 detail 표시용
         if (s.frameCount < 0 || s.frameCount > 5_000_000) throw new IllegalStateException("bad frameCount " + s.frameCount);
         if (s.eventCount < 0 || s.eventCount > 1_000_000) throw new IllegalStateException("bad eventCount " + s.eventCount);
     }

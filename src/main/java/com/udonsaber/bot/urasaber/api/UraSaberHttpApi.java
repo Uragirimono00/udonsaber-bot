@@ -1839,7 +1839,7 @@ public class UraSaberHttpApi {
         long playId = db.insertPlay(playerId, mapId, character, diff,
                 score, accuracy, null, maxCombo, hit, total, rank, sub.fullCombo, modifiersStr,
                 nowSec, nowSec, ip,
-                sub.good, sub.bad, sub.miss, noteCount, country);
+                sub.good, sub.bad, sub.miss, noteCount, country, sub.env);
 
         // 아바타 고스트 .bsor 저장 (프레임 있을 때만, 위에서 정한 해시 파일명으로). 저장 실패 시 링크 없음.
         if (replayFile != null) {
@@ -1957,7 +1957,7 @@ public class UraSaberHttpApi {
                 try { country = db.getPlayerCountry(playerId); if (country == null || country.isBlank()) { country = geo.lookup(ip); if (country != null) db.updatePlayerCountry(playerId, country); } } catch (Exception ignore) {}
                 int prevBest = previousBestScore(playerId, mapId, character, diff);
                 boolean personalBest = (prevBest < 0) || (score > prevBest);
-                db.insertPlay(playerId, mapId, character, diff, score, accuracy, null, maxCombo, hit, total, rank, header.fullCombo, modifiersStr, nowSec, nowSec, ip, header.good, header.bad, header.miss, noteCount, country);
+                db.insertPlay(playerId, mapId, character, diff, score, accuracy, null, maxCombo, hit, total, rank, header.fullCombo, modifiersStr, nowSec, nowSec, ip, header.good, header.bad, header.miss, noteCount, country, header.env);
                 registeredPlays.put(playId, nowMs);
                 if (notifier != null) {
                     pushNotification(nick, mapId, songName, songAuthor, character, diff, score, accuracy, null, maxCombo, header.good, header.bad, header.miss, noteCount, header.fullCombo, rank, personalBest, country, nowSec, arcViewerUrl);
@@ -2262,6 +2262,7 @@ public class UraSaberHttpApi {
         sb.append(",\"fullCombo\":").append(e.fullCombo());
         sb.append(",\"playedAt\":").append(e.playedAt());
         sb.append(",\"playCount\":").append(e.playCount());
+        sb.append(",\"env\":").append(jsonString(e.env()));
         sb.append('}');
         return sb.toString();
     }

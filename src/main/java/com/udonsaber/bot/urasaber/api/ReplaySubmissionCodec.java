@@ -32,8 +32,9 @@ import java.util.Base64;
  *  eventCount   : int32
  *  frames[]     : { int16 timeUnits(20ms), [head: posRel+quat], L: posRel+quat, R: posRel+quat }
  *  events[]     : { int32 spawnTime(초×10000), uint16 packed, byte pre, byte post }  (8B)
- *                 packed bits: line(0..3) | layer<<2 | color<<4 | cutDir<<5(0..15) | kind<<9(0 good/1 bad/2 miss)
- *                 spawnTime=노트 예정 시각(초)→ArcViewer 매칭(1ms). noteID=3*10000+line*1000+layer*100+color*10+cutDir
+ *                 packed bits: line(0..3) | layer<<2 | color<<4 | cutDir<<5(0..15) | kind<<9(0 good/1 bad/2 miss) | scoringType<<11(3..10)
+ *                 spawnTime=노트 예정 시각(초)→ArcViewer 매칭(1ms). noteID=scoringType*10000+line*1000+layer*100+color*10+cutDir
+ *                 scoringType: 3 Note/4 ArcHead/5 ArcTail/6 ChainHead/7 ChainLink
  * </pre>
  * posRel = int16×3, 값 = origin + i16/32767 × 16(POS_RANGE). quat = uint32 smallest-three.
  */
@@ -65,6 +66,7 @@ public final class ReplaySubmissionCodec {
         public int color;      // 0=red(left), 1=blue(right)
         public int cutDir;     // 0..8 (미스/미상=15)
         public int kind;       // 0 good / 1 bad / 2 miss
+        public int scoringType; // ArcViewer scoringType: 3 Note/4 ArcHead/5 ArcTail/6 ChainHead/7 ChainLink
         public int pre;        // 0..255 (Beat Saber preSwing 점수 0..70)
         public int post;       // 0..255 (postSwing 점수 0..30)
         public boolean isGoodOrBad() { return kind == KIND_GOOD || kind == KIND_BAD; }
@@ -272,6 +274,8 @@ public final class ReplaySubmissionCodec {
             e.color = (packed >> 4) & 0x1;
             e.cutDir = (packed >> 5) & 0xF;
             e.kind = (packed >> 9) & 0x3;
+            e.scoringType = (packed >> 11) & 0xF;   // 3 Note/4 ArcHead/5 ArcTail/6 ChainHead/7 ChainLink
+            if (e.scoringType < 3 || e.scoringType > 10) e.scoringType = 3;
             e.pre = rByte();
             e.post = rByte();
             events[j] = e;

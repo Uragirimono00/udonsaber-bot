@@ -126,7 +126,9 @@ public final class BsorWriter {
         ReplaySubmissionCodec.Event[] events = sub.events != null ? sub.events : new ReplaySubmissionCodec.Event[0];
         wInt(events.length);
         for (ReplaySubmissionCodec.Event e : events) {
-            int noteID = SCORING_TYPE_NORMAL * 10000 + e.line * 1000 + e.layer * 100 + e.color * 10 + e.cutDir;
+            // scoringType: 3 Note/4 ArcHead/5 ArcTail/6 ChainHead/7 ChainLink (이벤트가 보유). 0/무효면 일반 노트.
+            int st = (e.scoringType >= 3 && e.scoringType <= 10) ? e.scoringType : SCORING_TYPE_NORMAL;
+            int noteID = st * 10000 + e.line * 1000 + e.layer * 100 + e.color * 10 + e.cutDir;
             wInt(noteID);
             wFloat(e.spawnTime);   // eventTime (인디케이터) = spawnTime
             wFloat(e.spawnTime);   // spawnTime (매칭 기준)

@@ -6,7 +6,7 @@ build/
 .idea/
 *.iml
 
-# Local config & secrets
+# Local config & secrets.
 config/local.properties
 config/*.jks
 config/*.p12

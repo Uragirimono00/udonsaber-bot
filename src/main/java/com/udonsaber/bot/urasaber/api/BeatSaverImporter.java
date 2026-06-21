@@ -666,6 +666,22 @@ public final class BeatSaverImporter {
 
             List<SearchHit> hits = parseSearchDocs(bsApi);
 
+            // query 가 유효한 BSR 코드면 /maps/id 로 정확 조회해 최상단 고정 (page 0 한정).
+            // 제목 검색으로는 안 잡히는 경우(또는 하위 노출)라도 코드로 곡이 존재하면 맨 앞에 노출.
+            if (page == 0 && isValidBsr(query)) {
+                String idUrl = "https://api.beatsaver.com/maps/id/"
+                        + URLEncoder.encode(query.toLowerCase(), StandardCharsets.UTF_8);
+                String idJson = httpGet(idUrl);
+                if (idJson != null) {
+                    SearchHit exact = parseSearchDoc(idJson);
+                    if (exact != null && exact.bsr != null && !exact.bsr.isEmpty()) {
+                        // 텍스트 결과에 이미 포함돼 있으면 제거 후 맨 앞에 삽입 (중복 방지)
+                        hits.removeIf(h -> h.bsr != null && h.bsr.equalsIgnoreCase(exact.bsr));
+                        hits.add(0, exact);
+                    }
+                }
+            }
+
             StringBuilder b = new StringBuilder(16 * 1024);
             b.append("{\"ok\":true");
             b.append(",\"page\":").append(page);
